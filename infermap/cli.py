@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
+
+# Must be set before libomp is loaded (i.e. before any torch import).
+# Prevents crash when torch and onnxruntime each ship their own libomp.dylib on macOS.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import typer
 from rich.console import Console
@@ -12,7 +17,7 @@ from rich.table import Table
 from rich import box
 
 app = typer.Typer(
-    name="infermap",
+    name="pareto",
     help="Hardware-aware ML deployment optimization and recommendation.",
     add_completion=False,
 )
@@ -88,6 +93,7 @@ def benchmark(
     batch_size: int = typer.Option(1, help="Batch size for benchmarking"),
     warmup: int = typer.Option(10, help="Warm-up iterations"),
     iters: int = typer.Option(100, help="Measurement iterations"),
+    timeout: float = typer.Option(60.0, "--timeout", help="Per-candidate timeout in seconds (0 = no limit)"),
 ) -> None:
     """Benchmark all candidate deployment strategies."""
     import torch
@@ -98,6 +104,7 @@ def benchmark(
     from infermap.benchmark import benchmark_candidate
 
     shape = [int(x) for x in input_shape.split(",")]
+    timeout_s = timeout if timeout > 0 else None
 
     with console.status("[bold green]Profiling hardware..."):
         hw = profile_hardware()
@@ -118,7 +125,7 @@ def benchmark(
     results = []
     for cand in candidates:
         with console.status(f"  Benchmarking [cyan]{cand.description}[/cyan]..."):
-            r = benchmark_candidate(cand, model, info, shape, batch_size, warmup, iters)
+            r = benchmark_candidate(cand, model, info, shape, batch_size, warmup, iters, timeout_s=timeout_s)
         results.append(r)
         if r.ok:
             console.print(

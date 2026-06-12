@@ -42,21 +42,35 @@ def benchmark_candidate(
     batch_size: int = 1,
     warmup_iters: int = _WARMUP_ITERS,
     measure_iters: int = _MEASURE_ITERS,
+    timeout_s: float | None = 60.0,
 ) -> BenchmarkResult:
-    try:
+    import concurrent.futures
+
+    def _run() -> BenchmarkResult:
         return _run_benchmark(
             candidate, model, model_info, input_shape, batch_size, warmup_iters, measure_iters
         )
+
+    try:
+        if timeout_s is None:
+            return _run()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_run)
+            return future.result(timeout=timeout_s)
+    except concurrent.futures.TimeoutError:
+        error = f"timed out after {timeout_s:.0f}s"
     except Exception as exc:
-        return BenchmarkResult(
-            candidate=candidate,
-            latency_p50_ms=0.0,
-            latency_p95_ms=0.0,
-            latency_p99_ms=0.0,
-            throughput_rps=0.0,
-            memory_mb=0.0,
-            error=str(exc),
-        )
+        error = str(exc)
+
+    return BenchmarkResult(
+        candidate=candidate,
+        latency_p50_ms=0.0,
+        latency_p95_ms=0.0,
+        latency_p99_ms=0.0,
+        throughput_rps=0.0,
+        memory_mb=0.0,
+        error=error,
+    )
 
 
 def _run_benchmark(
@@ -100,11 +114,14 @@ def _prepare(
     batch_size: int,
     device: torch.device,
 ) -> tuple[Any, torch.Tensor]:
+    import copy
+
     gc.collect()
     if device.type == "cuda":
         torch.cuda.empty_cache()
 
-    m = model.to(device)
+    # Deep-copy so each candidate gets independent weights (dtype casts are in-place).
+    m = copy.deepcopy(model).to(device)
     m.eval()
 
     dtype_map = {
@@ -138,15 +155,20 @@ def _prepare_onnx(
     import onnxruntime as ort
 
     buffer = io.BytesIO()
-    torch.onnx.export(
-        model,
-        dummy.to("cpu"),
-        buffer,
-        opset_version=17,
-        input_names=["input"],
-        output_names=["output"],
-        dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
-    )
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        torch.onnx.export(
+            model,
+            dummy.to("cpu"),
+            buffer,
+            opset_version=17,
+            input_names=["input"],
+            output_names=["output"],
+            dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
+            dynamo=False,
+        )
     buffer.seek(0)
 
     providers: list[str]

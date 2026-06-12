@@ -156,11 +156,4 @@ def _cpu_candidates() -> list[DeploymentCandidate]:
             requires_export=True,
             device="cpu",
         ),
-        DeploymentCandidate(
-            backend="torch_compile_fp32",
-            dtype="fp32",
-            description="torch.compile CPU",
-            requires_export=False,
-            device="cpu",
-        ),
     ]
