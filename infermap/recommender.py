@@ -34,19 +34,24 @@ def recommend(
         min_throughput_rps: Hard constraint on minimum throughput (optional).
     """
     frontier = build_pareto_frontier(results)
+    passing = [r for r in results if r.ok]
 
-    # Apply hard constraints
-    candidates = frontier if frontier else [r for r in results if r.ok]
-    if max_latency_ms is not None:
-        candidates = [r for r in candidates if r.latency_p50_ms <= max_latency_ms]
-    if max_memory_mb is not None:
-        candidates = [r for r in candidates if r.memory_mb <= max_memory_mb]
-    if min_throughput_rps is not None:
-        candidates = [r for r in candidates if r.throughput_rps >= min_throughput_rps]
+    def _apply_constraints(pool: list[BenchmarkResult]) -> list[BenchmarkResult]:
+        if max_latency_ms is not None:
+            pool = [r for r in pool if r.latency_p50_ms <= max_latency_ms]
+        if max_memory_mb is not None:
+            pool = [r for r in pool if r.memory_mb <= max_memory_mb]
+        if min_throughput_rps is not None:
+            pool = [r for r in pool if r.throughput_rps >= min_throughput_rps]
+        return pool
 
-    # Fall back to all passing results if constraints filter everything out
+    # Apply constraints to Pareto frontier first, then widen to all passing results,
+    # then drop constraints entirely — each step only taken when the previous yields nothing.
+    candidates = _apply_constraints(frontier if frontier else passing)
     if not candidates:
-        candidates = [r for r in results if r.ok]
+        candidates = _apply_constraints(passing)
+    if not candidates:
+        candidates = passing
 
     ranked = rank_by_objective(candidates, objective)
     best = ranked[0]
