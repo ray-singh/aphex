@@ -34,6 +34,33 @@ class BenchmarkResult:
         return self.error is None
 
 
+def _worker(
+    queue: Any,
+    candidate: DeploymentCandidate,
+    model: nn.Module,
+    model_info: ModelInfo,
+    input_shape: list[int],
+    batch_size: int,
+    warmup_iters: int,
+    measure_iters: int,
+) -> None:
+    try:
+        result = _run_benchmark(
+            candidate, model, model_info, input_shape, batch_size, warmup_iters, measure_iters
+        )
+    except Exception as exc:
+        result = BenchmarkResult(
+            candidate=candidate,
+            latency_p50_ms=0.0,
+            latency_p95_ms=0.0,
+            latency_p99_ms=0.0,
+            throughput_rps=0.0,
+            memory_mb=0.0,
+            error=str(exc),
+        )
+    queue.put(result)
+
+
 def benchmark_candidate(
     candidate: DeploymentCandidate,
     model: nn.Module,
@@ -44,23 +71,38 @@ def benchmark_candidate(
     measure_iters: int = _MEASURE_ITERS,
     timeout_s: float | None = 60.0,
 ) -> BenchmarkResult:
-    import concurrent.futures
+    import multiprocessing as mp
 
-    def _run() -> BenchmarkResult:
-        return _run_benchmark(
-            candidate, model, model_info, input_shape, batch_size, warmup_iters, measure_iters
+    if timeout_s is None:
+        return _worker_inline(candidate, model, model_info, input_shape, batch_size, warmup_iters, measure_iters)
+
+    ctx = mp.get_context("spawn")
+    queue: mp.Queue[BenchmarkResult] = ctx.Queue()
+    proc = ctx.Process(
+        target=_worker,
+        args=(queue, candidate, model, model_info, input_shape, batch_size, warmup_iters, measure_iters),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(timeout=timeout_s)
+
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=5)
+        if proc.is_alive():
+            proc.kill()
+        return BenchmarkResult(
+            candidate=candidate,
+            latency_p50_ms=0.0,
+            latency_p95_ms=0.0,
+            latency_p99_ms=0.0,
+            throughput_rps=0.0,
+            memory_mb=0.0,
+            error=f"timed out after {timeout_s:.0f}s",
         )
 
-    try:
-        if timeout_s is None:
-            return _run()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(_run)
-            return future.result(timeout=timeout_s)
-    except concurrent.futures.TimeoutError:
-        error = f"timed out after {timeout_s:.0f}s"
-    except Exception as exc:
-        error = str(exc)
+    if not queue.empty():
+        return queue.get_nowait()
 
     return BenchmarkResult(
         candidate=candidate,
@@ -69,8 +111,33 @@ def benchmark_candidate(
         latency_p99_ms=0.0,
         throughput_rps=0.0,
         memory_mb=0.0,
-        error=error,
+        error="subprocess exited without result",
     )
+
+
+def _worker_inline(
+    candidate: DeploymentCandidate,
+    model: nn.Module,
+    model_info: ModelInfo,
+    input_shape: list[int],
+    batch_size: int,
+    warmup_iters: int,
+    measure_iters: int,
+) -> BenchmarkResult:
+    try:
+        return _run_benchmark(
+            candidate, model, model_info, input_shape, batch_size, warmup_iters, measure_iters
+        )
+    except Exception as exc:
+        return BenchmarkResult(
+            candidate=candidate,
+            latency_p50_ms=0.0,
+            latency_p95_ms=0.0,
+            latency_p99_ms=0.0,
+            throughput_rps=0.0,
+            memory_mb=0.0,
+            error=str(exc),
+        )
 
 
 def _run_benchmark(
