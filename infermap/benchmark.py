@@ -34,10 +34,37 @@ class BenchmarkResult:
         return self.error is None
 
 
+def _serialize_model(model: nn.Module) -> tuple[str, bytes]:
+    """Serialize a model to bytes for cross-process transfer.
+
+    ScriptModules can't be pickled — they require torch.jit.save/load.
+    Regular nn.Module instances are pickled normally via the 'module' path.
+    """
+    import io
+
+    if isinstance(model, torch.jit.ScriptModule):
+        buf = io.BytesIO()
+        torch.jit.save(model, buf)
+        return ("script", buf.getvalue())
+    buf = io.BytesIO()
+    torch.save(model, buf)
+    return ("module", buf.getvalue())
+
+
+def _deserialize_model(model_payload: tuple[str, bytes]) -> nn.Module:
+    import io
+
+    kind, data = model_payload
+    buf = io.BytesIO(data)
+    if kind == "script":
+        return torch.jit.load(buf)
+    return torch.load(buf, weights_only=False)
+
+
 def _worker(
     queue: Any,
     candidate: DeploymentCandidate,
-    model: nn.Module,
+    model_payload: tuple[str, bytes],
     model_info: ModelInfo,
     input_shape: list[int],
     batch_size: int,
@@ -45,6 +72,7 @@ def _worker(
     measure_iters: int,
 ) -> None:
     try:
+        model = _deserialize_model(model_payload)
         result = _run_benchmark(
             candidate, model, model_info, input_shape, batch_size, warmup_iters, measure_iters
         )
@@ -76,11 +104,13 @@ def benchmark_candidate(
     if timeout_s is None:
         return _worker_inline(candidate, model, model_info, input_shape, batch_size, warmup_iters, measure_iters)
 
+    model_payload = _serialize_model(model)
+
     ctx = mp.get_context("spawn")
     queue: mp.Queue[BenchmarkResult] = ctx.Queue()
     proc = ctx.Process(
         target=_worker,
-        args=(queue, candidate, model, model_info, input_shape, batch_size, warmup_iters, measure_iters),
+        args=(queue, candidate, model_payload, model_info, input_shape, batch_size, warmup_iters, measure_iters),
         daemon=True,
     )
     proc.start()
@@ -155,8 +185,6 @@ def _run_benchmark(
     timings_ms = _time_model(prepared_model, dummy_input, device, warmup_iters, measure_iters)
     memory_mb = _measure_memory(prepared_model, dummy_input, device, weight_mb)
 
-    import statistics
-
     timings_ms_sorted = sorted(timings_ms)
     n = len(timings_ms_sorted)
     p50 = timings_ms_sorted[int(n * 0.50)]
@@ -202,6 +230,11 @@ def _prepare(
         m = m.to(torch_dtype)
 
     if candidate.backend == "torch_compile_fp32":
+        if isinstance(m, torch.jit.ScriptModule):
+            raise RuntimeError(
+                "torch.compile is not compatible with TorchScript models. "
+                "Save an eager nn.Module instead of a scripted one."
+            )
         m = torch.compile(m)
 
     dummy = torch.randn(batch_size, *input_shape, dtype=torch_dtype, device=device)

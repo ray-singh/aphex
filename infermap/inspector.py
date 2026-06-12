@@ -77,14 +77,22 @@ def inspect_model(model_or_path: Any, input_shape: list[int] | None = None) -> M
 
 
 def _load_model(path: Path) -> Any:
-    import torch
+    import zipfile
 
-    obj = torch.load(path, map_location="cpu", weights_only=False)
+    import torch
     import torch.nn as nn
 
+    # TorchScript archives are ZIP files with a specific marker; load them directly
+    # to avoid a UserWarning from torch.load's auto-dispatch.
+    if zipfile.is_zipfile(path):
+        try:
+            return torch.jit.load(str(path), map_location="cpu")
+        except Exception:
+            pass  # fall through to torch.load for non-script zip saves
+
+    obj = torch.load(path, map_location="cpu", weights_only=False)
     if isinstance(obj, nn.Module):
         return obj
-    # Handle state-dict-only saves: caller must provide architecture separately
     raise ValueError(
         f"Loaded object from {path} is not an nn.Module. "
         "Pass a full model (not just a state dict) or load the architecture first."

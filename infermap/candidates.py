@@ -150,6 +150,13 @@ def _cpu_candidates() -> list[DeploymentCandidate]:
             device="cpu",
         ),
         DeploymentCandidate(
+            backend="torch_compile_fp32",
+            dtype="fp32",
+            description="torch.compile FP32 CPU",
+            requires_export=False,
+            device="cpu",
+        ),
+        DeploymentCandidate(
             backend="onnx_cpu",
             dtype="fp32",
             description="ONNX Runtime CPU",
