@@ -1,16 +1,16 @@
 # aphex
 
-Hardware-aware ML deployment optimization and recommendation framework.
+aphex is a hardware-aware ML deployment optimization and recommendation framework.
 
 aphex profiles your hardware, inspects your PyTorch model, benchmarks every viable deployment strategy, and recommends the fastest option that fits your constraints -- all from a single CLI command.
 
 ## Features
 
-- **Hardware profiling** -- detects CPU cores, RAM, CUDA GPUs, Apple MPS, and CoreML availability
-- **Model inspection** -- parameter count, memory footprint (FP32/FP16), architecture family
-- **Pre-flight checks** -- fast feasibility check before committing to a full benchmark run
-- **Multi-backend benchmarking** -- PyTorch (FP32/FP16/BF16), ONNX Runtime (CPU/CUDA/CoreML), `torch.compile`
-- **Pareto-optimal recommendation** -- picks the best strategy for your objective (latency, throughput, or memory)
+- **Hardware profiling**: detects CPU cores, RAM, CUDA GPUs, Apple MPS, and CoreML availability
+- **Model inspection**: parameter count, memory footprint (FP32/FP16), architecture family
+- **Pre-flight checks**: fast feasibility check before committing to a full benchmark run
+- **Multi-backend benchmarking**: PyTorch (FP32/FP16/BF16), ONNX Runtime (CPU/CUDA/CoreML), `torch.compile`
+- **Pareto-optimal recommendation**: picks the best strategy for your objective (latency, throughput, or memory)
 
 ## Installation
 
