@@ -17,7 +17,7 @@ from rich.table import Table
 from rich import box
 
 app = typer.Typer(
-    name="pareto",
+    name="aphex",
     help="Hardware-aware ML deployment optimization and recommendation.",
     add_completion=False,
 )
@@ -154,6 +154,7 @@ def optimize(
     max_latency_ms: Optional[float] = typer.Option(None, "--max-latency-ms"),
     max_memory_mb: Optional[float] = typer.Option(None, "--max-memory-mb"),
     min_throughput_rps: Optional[float] = typer.Option(None, "--min-throughput-rps"),
+    timeout: float = typer.Option(60.0, "--timeout", help="Per-candidate timeout in seconds (0 = no limit)"),
 ) -> None:
     """Benchmark all candidates and recommend the optimal deployment strategy."""
     import torch
@@ -165,6 +166,7 @@ def optimize(
     from infermap.recommender import recommend
 
     shape = [int(x) for x in input_shape.split(",")]
+    timeout_s = timeout if timeout > 0 else None
 
     with console.status("[bold green]Profiling hardware..."):
         hw = profile_hardware()
@@ -185,7 +187,7 @@ def optimize(
     results = []
     for cand in candidates:
         with console.status(f"  [cyan]{cand.description}[/cyan]..."):
-            r = benchmark_candidate(cand, model, info, shape, batch_size)
+            r = benchmark_candidate(cand, model, info, shape, batch_size, timeout_s=timeout_s)
         results.append(r)
 
     rec = recommend(

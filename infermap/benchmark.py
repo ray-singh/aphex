@@ -150,10 +150,10 @@ def _run_benchmark(
     measure_iters: int,
 ) -> BenchmarkResult:
     device = torch.device(candidate.device)
-    prepared_model, dummy_input = _prepare(candidate, model, input_shape, batch_size, device)
+    prepared_model, dummy_input, weight_mb = _prepare(candidate, model, input_shape, batch_size, device)
 
     timings_ms = _time_model(prepared_model, dummy_input, device, warmup_iters, measure_iters)
-    memory_mb = _measure_memory(prepared_model, dummy_input, device)
+    memory_mb = _measure_memory(prepared_model, dummy_input, device, weight_mb)
 
     import statistics
 
@@ -180,7 +180,7 @@ def _prepare(
     input_shape: list[int],
     batch_size: int,
     device: torch.device,
-) -> tuple[Any, torch.Tensor]:
+) -> tuple[Any, torch.Tensor, float]:
     import copy
 
     gc.collect()
@@ -206,10 +206,16 @@ def _prepare(
 
     dummy = torch.randn(batch_size, *input_shape, dtype=torch_dtype, device=device)
 
+    # Compute weight memory before ONNX conversion (session doesn't expose parameters).
+    weight_mb = (
+        sum(p.numel() * p.element_size() for p in m.parameters())
+        + sum(b.numel() * b.element_size() for b in m.buffers())
+    ) / 1e6
+
     if candidate.backend in ("onnx_cpu", "onnx_cuda", "onnx_coreml"):
         m, dummy = _prepare_onnx(candidate, m, dummy, device)
 
-    return m, dummy
+    return m, dummy, weight_mb
 
 
 def _prepare_onnx(
@@ -302,11 +308,14 @@ def _time_model(
     return timings_ms
 
 
-def _measure_memory(model: Any, dummy: torch.Tensor, device: torch.device) -> float:
-    """Return peak memory usage in MB for one forward pass."""
+def _measure_memory(
+    model: Any, dummy: torch.Tensor, device: torch.device, weight_mb: float
+) -> float:
+    """Return model memory in MB (weights + peak activations where measurable)."""
     import onnxruntime as ort
 
     if device.type == "cuda":
+        # CUDA tracks peak allocation precisely — includes weights + activations.
         torch.cuda.reset_peak_memory_stats(device)
         with torch.no_grad():
             model(dummy)
@@ -314,26 +323,20 @@ def _measure_memory(model: Any, dummy: torch.Tensor, device: torch.device) -> fl
         return torch.cuda.max_memory_allocated(device) / 1e6
 
     if device.type == "mps":
-        # MPS does not expose peak memory APIs; use psutil RAM delta as a proxy
-        import psutil
-
-        proc = psutil.Process()
-        before = proc.memory_info().rss
+        # MPS: weight bytes are exact; add allocation delta for activations.
+        torch.mps.synchronize()  # type: ignore[attr-defined]
+        before = torch.mps.current_allocated_memory()  # type: ignore[attr-defined]
         with torch.no_grad():
             model(dummy)
         torch.mps.synchronize()  # type: ignore[attr-defined]
-        after = proc.memory_info().rss
-        return max(0.0, (after - before) / 1e6)
+        after = torch.mps.current_allocated_memory()  # type: ignore[attr-defined]
+        activation_mb = max(0.0, (after - before) / 1e6)
+        return weight_mb + activation_mb
 
-    # CPU / ONNX
-    import psutil
-
-    proc = psutil.Process()
-    before = proc.memory_info().rss
+    # CPU / ONNX: weight bytes are exact; activations are small for batch_size=1.
     if isinstance(model, ort.InferenceSession):
         model.run(None, {"input": dummy.numpy()})
     else:
         with torch.no_grad():
             model(dummy)
-    after = proc.memory_info().rss
-    return max(0.0, (after - before) / 1e6)
+    return weight_mb

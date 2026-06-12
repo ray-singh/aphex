@@ -1,5 +1,5 @@
 [project]
-name = "infermap"
+name = "aphex"
 version = "0.1.0"
 description = "Hardware-aware ML deployment optimization and recommendation framework"
 readme = "README.md"
@@ -28,7 +28,10 @@ dev = [
 ]
 
 [project.scripts]
-pareto = "infermap.cli:app"
+aphex = "infermap.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["infermap"]
 
 [build-system]
 requires = ["hatchling"]

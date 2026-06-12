@@ -1,8 +1,8 @@
-# pareto
+# aphex
 
 Hardware-aware ML deployment optimization and recommendation framework.
 
-pareto profiles your hardware, inspects your PyTorch model, benchmarks every viable deployment strategy, and recommends the fastest option that fits your constraints -- all from a single CLI command.
+aphex profiles your hardware, inspects your PyTorch model, benchmarks every viable deployment strategy, and recommends the fastest option that fits your constraints -- all from a single CLI command.
 
 ## Features
 
@@ -15,29 +15,29 @@ pareto profiles your hardware, inspects your PyTorch model, benchmarks every via
 ## Installation
 
 ```bash
-pip install pareto
+pip install aphex
 ```
 
 For CUDA support:
 
 ```bash
-pip install "pareto[cuda]"
+pip install "aphex[cuda]"
 ```
 
 ## Quickstart
 
 ```bash
 # Inspect your hardware and model
-pareto analyze model.pt
+aphex analyze model.pt
 
 # Run a feasibility check before benchmarking
-pareto preflight model.pt --dtype fp16
+aphex preflight model.pt --dtype fp16
 
 # Benchmark all deployment strategies
-pareto benchmark model.pt --input-shape 3,224,224
+aphex benchmark model.pt --input-shape 3,224,224
 
 # Get an optimized recommendation
-pareto optimize model.pt --input-shape 3,224,224 --objective latency
+aphex optimize model.pt --input-shape 3,224,224 --objective latency
 ```
 
 ## Example output
@@ -56,10 +56,10 @@ Running 5 candidates...
 
 | Command | Description |
 |---------|-------------|
-| `pareto analyze <model>` | Hardware profile + model inspection |
-| `pareto preflight <model>` | Feasibility check (fast, no benchmarking) |
-| `pareto benchmark <model>` | Full benchmark across all backends |
-| `pareto optimize <model>` | Benchmark + Pareto-optimal recommendation |
+| `aphex analyze <model>` | Hardware profile + model inspection |
+| `aphex preflight <model>` | Feasibility check (fast, no benchmarking) |
+| `aphex benchmark <model>` | Full benchmark across all backends |
+| `aphex optimize <model>` | Benchmark + Pareto-optimal recommendation |
 
 ### Common options
 
