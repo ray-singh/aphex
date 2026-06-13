@@ -107,10 +107,13 @@ def benchmark(
     batch_size: int = typer.Option(1, help="Batch size for benchmarking"),
     warmup: int = typer.Option(10, help="Warm-up iterations"),
     iters: int = typer.Option(100, help="Measurement iterations"),
-    timeout: float = typer.Option(60.0, "--timeout", help="Per-candidate timeout in seconds (0 = no limit)"),
+    timeout: float = typer.Option(180.0, "--timeout", help="Per-candidate timeout in seconds (0 = no limit)"),
+    calibration_data: Optional[Path] = typer.Option(
+        None, "--calibration-data",
+        help="Path to a .pt file with calibration inputs for INT8 accuracy measurement",
+    ),
 ) -> None:
     """Benchmark all candidate deployment strategies."""
-    import torch
     from infermap.inspector import inspect_model
     from infermap.profiler import profile_hardware
     from infermap.preflight import run_preflight
@@ -133,11 +136,13 @@ def benchmark(
     if pf.category == "unlikely":
         _prompt_unlikely_or_abort()
 
-    model = torch.load(model_path, map_location="cpu", weights_only=False)
+    from infermap.inspector import _load_model
+    model = _load_model(model_path)
     model.eval()
 
+    calib = _load_calibration(calibration_data)
     candidates = generate_candidates(info, hw)
-    results = _run_candidates(candidates, model, info, shape, batch_size, warmup, iters, timeout_s)
+    results = _run_candidates(candidates, model, info, shape, batch_size, warmup, iters, timeout_s, calib)
     _print_results_table(results)
 
 
@@ -155,10 +160,13 @@ def optimize(
     max_latency_ms: Optional[float] = typer.Option(None, "--max-latency-ms"),
     max_memory_mb: Optional[float] = typer.Option(None, "--max-memory-mb"),
     min_throughput_rps: Optional[float] = typer.Option(None, "--min-throughput-rps"),
-    timeout: float = typer.Option(60.0, "--timeout", help="Per-candidate timeout in seconds (0 = no limit)"),
+    timeout: float = typer.Option(180.0, "--timeout", help="Per-candidate timeout in seconds (0 = no limit)"),
+    calibration_data: Optional[Path] = typer.Option(
+        None, "--calibration-data",
+        help="Path to a .pt file with calibration inputs for INT8 accuracy measurement",
+    ),
 ) -> None:
     """Benchmark all candidates and recommend the optimal deployment strategy."""
-    import torch
     from infermap.inspector import inspect_model
     from infermap.profiler import profile_hardware
     from infermap.preflight import run_preflight
@@ -182,11 +190,13 @@ def optimize(
     if pf.category == "unlikely":
         _prompt_unlikely_or_abort()
 
-    model = torch.load(model_path, map_location="cpu", weights_only=False)
+    from infermap.inspector import _load_model
+    model = _load_model(model_path)
     model.eval()
 
+    calib = _load_calibration(calibration_data)
     candidates = generate_candidates(info, hw)
-    results = _run_candidates(candidates, model, info, shape, batch_size, 10, 100, timeout_s)
+    results = _run_candidates(candidates, model, info, shape, batch_size, 10, 100, timeout_s, calib)
     _print_results_table(results)
 
     rec = recommend(
@@ -204,6 +214,18 @@ def optimize(
 # ---------------------------------------------------------------------------
 
 
+def _load_calibration(path: Optional[Path]) -> list | None:
+    if path is None:
+        return None
+    import torch
+    raw = torch.load(path, weights_only=False)
+    if isinstance(raw, torch.Tensor):
+        return [raw[i : i + 1] for i in range(min(raw.size(0), 32))]
+    if isinstance(raw, list):
+        return raw[:32]
+    return None
+
+
 def _run_candidates(
     candidates: list,
     model: object,
@@ -213,6 +235,7 @@ def _run_candidates(
     warmup: int,
     iters: int,
     timeout_s: float | None,
+    calibration_inputs: list | None = None,
 ) -> list:
     from infermap.benchmark import benchmark_candidate
 
@@ -234,8 +257,9 @@ def _run_candidates(
         )
         for cand in candidates:
             progress.update(task, description=cand.description)
-            r = benchmark_candidate(
-                cand, model, model_info, shape, batch_size, warmup, iters, timeout_s=timeout_s  # type: ignore[arg-type]
+            r = benchmark_candidate(  # type: ignore[arg-type]
+                cand, model, model_info, shape, batch_size, warmup, iters,
+                timeout_s=timeout_s, calibration_inputs=calibration_inputs,
             )
             results.append(r)
             if r.ok:
@@ -363,6 +387,7 @@ def _print_results_table(results: list) -> None:
         return
 
     max_tput = max(r.throughput_rps for r in ok)
+    has_accuracy = any(r.accuracy_drop is not None for r in results)
 
     t = Table(box=box.SIMPLE, show_header=True, header_style="dim", padding=(0, 1))
     t.add_column("", width=3, justify="right")           # rank
@@ -371,30 +396,39 @@ def _print_results_table(results: list) -> None:
     t.add_column("p95", justify="right")
     t.add_column("req/s", justify="right")
     t.add_column("mb", justify="right")
+    if has_accuracy:
+        t.add_column("acc drop", justify="right")
     t.add_column("speed", min_width=20)
 
     for i, r in enumerate(ok):
         assert isinstance(r, BenchmarkResult)
         s = _RANK_STYLES[min(i, len(_RANK_STYLES) - 1)]
         bar = _speed_bar(r.throughput_rps, max_tput)
-        t.add_row(
+        row: list[str] = [
             f"[{s}]#{i + 1}[/{s}]",
             f"[{s}]{r.candidate.description}[/{s}]",
             f"[{s}]{r.latency_p50_ms:.2f} ms[/{s}]",
             f"[dim]{r.latency_p95_ms:.2f} ms[/dim]",
             f"[dim]{r.throughput_rps:.0f}[/dim]",
             f"[dim]{r.memory_mb:.0f}[/dim]",
-            f"[{s}]{bar}[/{s}]",
-        )
+        ]
+        if has_accuracy:
+            acc = f"{r.accuracy_drop * 100:.2f}%" if r.accuracy_drop is not None else "—"
+            row.append(f"[dim]{acc}[/dim]")
+        row.append(f"[{s}]{bar}[/{s}]")
+        t.add_row(*row)
 
     for r in failed:
         assert isinstance(r, BenchmarkResult)
-        t.add_row(
+        row = [
             "[dim]—[/dim]",
             f"[dim]{r.candidate.description}[/dim]",
             "[dim]—[/dim]", "[dim]—[/dim]", "[dim]—[/dim]", "[dim]—[/dim]",
-            f"[red]{(r.error or '')[:28]}[/red]",
-        )
+        ]
+        if has_accuracy:
+            row.append("[dim]—[/dim]")
+        row.append(f"[red]{(r.error or '')[:28]}[/red]")
+        t.add_row(*row)
 
     console.print(Rule("[dim]results[/dim]", style="dim"))
     console.print(t)
@@ -406,11 +440,17 @@ def _print_recommendation(rec: object) -> None:
     assert isinstance(rec, Recommendation)
     r = rec.result
 
+    acc_line = (
+        f"  [dim]acc drop[/dim]  {r.accuracy_drop * 100:.2f}%\n"
+        if r.accuracy_drop is not None
+        else ""
+    )
     stats = (
         f"  [dim]p50[/dim]    [bold]{r.latency_p50_ms:.2f} ms[/bold]\n"
         f"  [dim]p95[/dim]    {r.latency_p95_ms:.2f} ms\n"
         f"  [dim]req/s[/dim]  [bold]{r.throughput_rps:.0f}[/bold]\n"
         f"  [dim]mb[/dim]     {r.memory_mb:.0f}\n"
+        + acc_line
     )
 
     frontier_note = (

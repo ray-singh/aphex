@@ -9,7 +9,6 @@ Run:
 
 No CLI flags needed — the script sets everything up itself.
 """
-
 from __future__ import annotations
 import sys
 import tempfile

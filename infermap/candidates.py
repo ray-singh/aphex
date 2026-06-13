@@ -17,6 +17,8 @@ Backend = Literal[
     "onnx_cpu",
     "onnx_cuda",
     "onnx_coreml",
+    "pytorch_int8_dynamic",
+    "onnx_int8_cpu",
 ]
 
 
@@ -96,6 +98,23 @@ def _cuda_candidates(hardware: HardwareProfile) -> list[DeploymentCandidate]:
             )
         )
 
+    candidates += [
+        DeploymentCandidate(
+            backend="pytorch_int8_dynamic",
+            dtype="int8",
+            description="PyTorch INT8 dynamic (CPU)",
+            requires_export=False,
+            device="cpu",
+        ),
+        DeploymentCandidate(
+            backend="onnx_int8_cpu",
+            dtype="int8",
+            description="ONNX Runtime INT8 (CPU)",
+            requires_export=True,
+            device="cpu",
+        ),
+    ]
+
     return candidates
 
 
@@ -136,6 +155,20 @@ def _mps_candidates(hardware: HardwareProfile) -> list[DeploymentCandidate]:
             requires_export=False,
             device="cpu",
         ),
+        DeploymentCandidate(
+            backend="pytorch_int8_dynamic",
+            dtype="int8",
+            description="PyTorch INT8 dynamic (CPU)",
+            requires_export=False,
+            device="cpu",
+        ),
+        DeploymentCandidate(
+            backend="onnx_int8_cpu",
+            dtype="int8",
+            description="ONNX Runtime INT8 (CPU)",
+            requires_export=True,
+            device="cpu",
+        ),
     ]
     return candidates
 
@@ -160,6 +193,20 @@ def _cpu_candidates() -> list[DeploymentCandidate]:
             backend="onnx_cpu",
             dtype="fp32",
             description="ONNX Runtime CPU",
+            requires_export=True,
+            device="cpu",
+        ),
+        DeploymentCandidate(
+            backend="pytorch_int8_dynamic",
+            dtype="int8",
+            description="PyTorch INT8 dynamic (CPU)",
+            requires_export=False,
+            device="cpu",
+        ),
+        DeploymentCandidate(
+            backend="onnx_int8_cpu",
+            dtype="int8",
+            description="ONNX Runtime INT8 (CPU)",
             requires_export=True,
             device="cpu",
         ),
