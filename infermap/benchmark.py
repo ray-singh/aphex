@@ -39,8 +39,9 @@ class BenchmarkResult:
     latency_p50_ms: float
     latency_p95_ms: float
     latency_p99_ms: float
-    throughput_rps: float  # requests/sec at batch_size=1
+    throughput_rps: float  # requests/sec (batch_size items / p50 latency)
     memory_mb: float
+    batch_size: int = 1
     error: str | None = None
     accuracy_drop: float | None = None  # cosine-similarity drop vs FP32 baseline; None if not measured
 
@@ -100,6 +101,7 @@ def _worker(
             latency_p99_ms=0.0,
             throughput_rps=0.0,
             memory_mb=0.0,
+            batch_size=batch_size,
             error=str(exc),
         )
     queue.put(result)
@@ -150,6 +152,7 @@ def benchmark_candidate(
             latency_p99_ms=0.0,
             throughput_rps=0.0,
             memory_mb=0.0,
+            batch_size=batch_size,
             error=f"timed out after {timeout_s:.0f}s",
         )
 
@@ -163,6 +166,7 @@ def benchmark_candidate(
         latency_p99_ms=0.0,
         throughput_rps=0.0,
         memory_mb=0.0,
+        batch_size=batch_size,
         error="subprocess exited without result",
     )
 
@@ -189,6 +193,7 @@ def _worker_inline(
             latency_p99_ms=0.0,
             throughput_rps=0.0,
             memory_mb=0.0,
+            batch_size=batch_size,
             error=str(exc),
         )
 
@@ -228,6 +233,7 @@ def _run_benchmark(
         latency_p99_ms=p99,
         throughput_rps=throughput,
         memory_mb=memory_mb,
+        batch_size=batch_size,
         accuracy_drop=accuracy_drop,
     )
 

@@ -14,6 +14,8 @@ aphex profiles your hardware, inspects your PyTorch model, benchmarks every viab
 - **Pre-flight checks**: fast feasibility check before committing to a full benchmark run
 - **Multi-backend benchmarking**: PyTorch (FP32/FP16/BF16), ONNX Runtime (CPU/CUDA/CoreML), `torch.compile`, INT8 quantization
 - **INT8 quantization**: dynamic quantization via PyTorch and ONNX Runtime, with optional accuracy-drop measurement against calibration data
+- **Batch size sweep**: benchmarks every backend across multiple batch sizes in one run; recommends the best `(backend, batch_size)` pair
+- **JSON output**: `--format json` emits machine-readable results for CI/CD pipelines
 - **Pareto-optimal recommendation**: picks the best strategy for your objective (latency, throughput, or memory)
 
 ## Installation
@@ -41,15 +43,20 @@ aphex optimize model.pt --input-shape 3,224,224 --objective latency
 ## Example output
 
 ```
-Running 7 candidates...
+racing 7 backends × 4 batch sizes
 
-  ✓ PyTorch FP32 CPU                    p50=  17.55 ms        57 req/s
-  ✓ PyTorch FP32 MPS                    p50=   4.95 ms       202 req/s
-  ✓ PyTorch FP16 MPS                    p50=   4.64 ms       215 req/s
-  ✓ ONNX Runtime + CoreML               p50=   0.92 ms      1085 req/s
-  ✓ PyTorch FP32 + torch.compile CPU    p50=   8.10 ms       123 req/s
-  ✓ PyTorch INT8 dynamic (CPU)          p50=   0.07 ms   acc drop=0.002%
-  ✓ ONNX Runtime INT8 (CPU)             p50=   0.01 ms   acc drop=0.003%
+  ✓ PyTorch FP32 CPU           bs=1     17.55 ms      57 req/s
+  ✓ PyTorch FP32 CPU           bs=8      2.44 ms     410 req/s
+  ✓ ONNX Runtime + CoreML      bs=1      0.92 ms    1085 req/s
+  ✓ ONNX Runtime + CoreML      bs=8      0.31 ms    3226 req/s
+  ✓ ONNX Runtime INT8 (CPU)    bs=1      0.01 ms    9200 req/s
+  ✓ ONNX Runtime INT8 (CPU)    bs=8      0.04 ms   24800 req/s
+  ...
+
+  #1  ONNX Runtime INT8 (CPU)   bs=8   0.04 ms   24800 req/s  ████████████████░░░░
+  #2  ONNX Runtime INT8 (CPU)   bs=4   0.03 ms   16600 req/s  █████████████░░░░░░░
+  #3  ONNX Runtime + CoreML     bs=8   0.31 ms    3226 req/s  ██░░░░░░░░░░░░░░░░░░
+  ...
 ```
 
 ## CLI reference
@@ -65,7 +72,7 @@ Running 7 candidates...
 
 ```
 --input-shape 3,224,224   Input tensor shape (no batch dim)
---batch-size 1            Batch size for benchmarking
+--batch-sizes 1,2,4,8     Batch sizes to sweep (comma-separated)
 --warmup 10               Warm-up iterations before timing
 --iters 100               Measurement iterations
 --objective latency       Optimization goal: latency | throughput | memory
@@ -73,6 +80,7 @@ Running 7 candidates...
 --max-memory-mb 512       Hard constraint on peak memory
 --min-throughput-rps 200  Hard constraint on throughput
 --calibration-data PATH   .pt file or image directory for INT8 accuracy measurement
+--format table|json       Output format (json suppresses all Rich output)
 ```
 
 ## Pipeline
@@ -91,7 +99,7 @@ model.pt + hardware
   generate_candidates() --> list of (backend, dtype, device) combos
        |
        v
-  benchmark_candidate() x N --> p50/p95/p99 latency, throughput, memory
+  benchmark_candidate() x (backends × batch_sizes) --> p50/p95/p99, throughput, memory
        |
        v
   recommend() --> Pareto frontier -> best candidate for objective

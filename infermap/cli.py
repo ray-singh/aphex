@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Optional
@@ -104,7 +105,7 @@ def benchmark(
     input_shape: str = typer.Option(
         "3,224,224", "--input-shape", help="Input tensor shape (no batch dim), e.g. 3,224,224"
     ),
-    batch_size: int = typer.Option(1, help="Batch size for benchmarking"),
+    batch_sizes: str = typer.Option("1,2,4,8", "--batch-sizes", help="Comma-separated batch sizes to sweep, e.g. 1,2,4,8"),
     warmup: int = typer.Option(10, help="Warm-up iterations"),
     iters: int = typer.Option(100, help="Measurement iterations"),
     timeout: float = typer.Option(180.0, "--timeout", help="Per-candidate timeout in seconds (0 = no limit)"),
@@ -112,6 +113,7 @@ def benchmark(
         None, "--calibration-data",
         help="Path to a .pt file with calibration inputs for INT8 accuracy measurement",
     ),
+    format_: str = typer.Option("table", "--format", help="Output format: table | json"),
 ) -> None:
     """Benchmark all candidate deployment strategies."""
     from infermap.inspector import inspect_model
@@ -120,9 +122,12 @@ def benchmark(
     from infermap.candidates import generate_candidates
 
     shape = [int(x) for x in input_shape.split(",")]
+    bs_list = [int(x) for x in batch_sizes.split(",")]
     timeout_s = timeout if timeout > 0 else None
+    json_mode = format_ == "json"
 
-    _print_header("benchmark")
+    if not json_mode:
+        _print_header("benchmark")
 
     with console.status("[bold green]Profiling hardware..."):
         hw = profile_hardware()
@@ -130,10 +135,13 @@ def benchmark(
         info = inspect_model(model_path, input_shape=shape)
 
     pf = run_preflight(info, hw)
-    _print_preflight(pf)
+    if not json_mode:
+        _print_preflight(pf)
     if pf.category == "impossible":
+        if json_mode:
+            print(json.dumps({"error": pf.message, "category": "impossible"}, indent=2))
         raise typer.Exit(code=1)
-    if pf.category == "unlikely":
+    if pf.category == "unlikely" and not json_mode:
         _prompt_unlikely_or_abort()
 
     from infermap.inspector import _load_model
@@ -142,8 +150,11 @@ def benchmark(
 
     calib = _load_calibration(calibration_data, shape)
     candidates = generate_candidates(info, hw)
-    results = _run_candidates(candidates, model, info, shape, batch_size, warmup, iters, timeout_s, calib)
-    _print_results_table(results)
+    results = _run_candidates(candidates, model, info, shape, bs_list, warmup, iters, timeout_s, calib, json_mode=json_mode)
+    if json_mode:
+        _emit_json(results)
+    else:
+        _print_results_table(results)
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +167,7 @@ def optimize(
     model_path: Path = typer.Argument(..., help="Path to a saved PyTorch model"),
     objective: str = typer.Option("latency", help="Optimization goal: latency, throughput, memory"),
     input_shape: str = typer.Option("3,224,224", "--input-shape", help="Input shape (no batch)"),
-    batch_size: int = typer.Option(1, help="Batch size"),
+    batch_sizes: str = typer.Option("1,2,4,8", "--batch-sizes", help="Comma-separated batch sizes to sweep, e.g. 1,2,4,8"),
     max_latency_ms: Optional[float] = typer.Option(None, "--max-latency-ms"),
     max_memory_mb: Optional[float] = typer.Option(None, "--max-memory-mb"),
     min_throughput_rps: Optional[float] = typer.Option(None, "--min-throughput-rps"),
@@ -165,6 +176,7 @@ def optimize(
         None, "--calibration-data",
         help="Path to a .pt file with calibration inputs for INT8 accuracy measurement",
     ),
+    format_: str = typer.Option("table", "--format", help="Output format: table | json"),
 ) -> None:
     """Benchmark all candidates and recommend the optimal deployment strategy."""
     from infermap.inspector import inspect_model
@@ -174,9 +186,12 @@ def optimize(
     from infermap.recommender import recommend
 
     shape = [int(x) for x in input_shape.split(",")]
+    bs_list = [int(x) for x in batch_sizes.split(",")]
     timeout_s = timeout if timeout > 0 else None
+    json_mode = format_ == "json"
 
-    _print_header("optimize")
+    if not json_mode:
+        _print_header("optimize")
 
     with console.status("[bold green]Profiling hardware..."):
         hw = profile_hardware()
@@ -184,10 +199,13 @@ def optimize(
         info = inspect_model(model_path, input_shape=shape)
 
     pf = run_preflight(info, hw)
-    _print_preflight(pf)
+    if not json_mode:
+        _print_preflight(pf)
     if pf.category == "impossible":
+        if json_mode:
+            print(json.dumps({"error": pf.message, "category": "impossible"}, indent=2))
         raise typer.Exit(code=1)
-    if pf.category == "unlikely":
+    if pf.category == "unlikely" and not json_mode:
         _prompt_unlikely_or_abort()
 
     from infermap.inspector import _load_model
@@ -196,8 +214,7 @@ def optimize(
 
     calib = _load_calibration(calibration_data, shape)
     candidates = generate_candidates(info, hw)
-    results = _run_candidates(candidates, model, info, shape, batch_size, 10, 100, timeout_s, calib)
-    _print_results_table(results)
+    results = _run_candidates(candidates, model, info, shape, bs_list, 10, 100, timeout_s, calib, json_mode=json_mode)
 
     rec = recommend(
         results,
@@ -206,7 +223,11 @@ def optimize(
         max_memory_mb=max_memory_mb,
         min_throughput_rps=min_throughput_rps,
     )
-    _print_recommendation(rec)
+    if json_mode:
+        _emit_json(results, rec)
+    else:
+        _print_results_table(results)
+        _print_recommendation(rec)
 
 
 # ---------------------------------------------------------------------------
@@ -274,15 +295,28 @@ def _run_candidates(
     model: object,
     model_info: object,
     shape: list[int],
-    batch_size: int,
+    batch_sizes: list[int],
     warmup: int,
     iters: int,
     timeout_s: float | None,
     calibration_inputs: list | None = None,
+    json_mode: bool = False,
 ) -> list:
     from infermap.benchmark import benchmark_candidate
 
     results = []
+    total = len(candidates) * len(batch_sizes)
+
+    if json_mode:
+        for cand in candidates:
+            for bs in batch_sizes:
+                r = benchmark_candidate(  # type: ignore[arg-type]
+                    cand, model, model_info, shape, bs, warmup, iters,
+                    timeout_s=timeout_s, calibration_inputs=calibration_inputs,
+                )
+                results.append(r)
+        return results
+
     console.print()
 
     with Progress(
@@ -295,31 +329,72 @@ def _run_candidates(
         console=console,
     ) as progress:
         task = progress.add_task(
-            f"racing {len(candidates)} configurations",
-            total=len(candidates),
+            f"racing {len(candidates)} backends × {len(batch_sizes)} batch sizes",
+            total=total,
         )
         for cand in candidates:
-            progress.update(task, description=cand.description)
-            r = benchmark_candidate(  # type: ignore[arg-type]
-                cand, model, model_info, shape, batch_size, warmup, iters,
-                timeout_s=timeout_s, calibration_inputs=calibration_inputs,
-            )
-            results.append(r)
-            if r.ok:
-                progress.console.print(
-                    f"  [green]✓[/green]  {cand.description:<44}"
-                    f"  [bold]{r.latency_p50_ms:>8.2f} ms[/bold]"
-                    f"  [dim]{r.throughput_rps:>7.0f} req/s[/dim]"
+            for bs in batch_sizes:
+                progress.update(task, description=f"{cand.description}  bs={bs}")
+                r = benchmark_candidate(  # type: ignore[arg-type]
+                    cand, model, model_info, shape, bs, warmup, iters,
+                    timeout_s=timeout_s, calibration_inputs=calibration_inputs,
                 )
-            else:
-                progress.console.print(
-                    f"  [red]✗[/red]  [dim]{cand.description:<44}[/dim]"
-                    f"  [red]{(r.error or '')[:55]}[/red]"
-                )
-            progress.advance(task)
+                results.append(r)
+                if r.ok:
+                    progress.console.print(
+                        f"  [green]✓[/green]  {cand.description:<44}"
+                        f"  [dim]bs={bs:<3}[/dim]"
+                        f"  [bold]{r.latency_p50_ms:>8.2f} ms[/bold]"
+                        f"  [dim]{r.throughput_rps:>7.0f} req/s[/dim]"
+                    )
+                else:
+                    progress.console.print(
+                        f"  [red]✗[/red]  [dim]{cand.description:<44}  bs={bs}[/dim]"
+                        f"  [red]{(r.error or '')[:55]}[/red]"
+                    )
+                progress.advance(task)
 
     console.print()
     return results
+
+
+# ---------------------------------------------------------------------------
+# JSON output helpers
+# ---------------------------------------------------------------------------
+
+
+def _result_to_dict(r: object) -> dict:
+    from infermap.benchmark import BenchmarkResult
+    assert isinstance(r, BenchmarkResult)
+    return {
+        "backend": r.candidate.backend,
+        "dtype": r.candidate.dtype,
+        "device": r.candidate.device,
+        "description": r.candidate.description,
+        "batch_size": r.batch_size,
+        "ok": r.ok,
+        "latency_p50_ms": r.latency_p50_ms if r.ok else None,
+        "latency_p95_ms": r.latency_p95_ms if r.ok else None,
+        "latency_p99_ms": r.latency_p99_ms if r.ok else None,
+        "throughput_rps": r.throughput_rps if r.ok else None,
+        "memory_mb": r.memory_mb if r.ok else None,
+        "accuracy_drop": r.accuracy_drop,
+        "error": r.error,
+    }
+
+
+def _emit_json(results: list, recommendation: object = None) -> None:
+    payload: dict = {"results": [_result_to_dict(r) for r in results]}
+    if recommendation is not None:
+        from infermap.recommender import Recommendation
+        assert isinstance(recommendation, Recommendation)
+        r = recommendation.result
+        payload["recommendation"] = {
+            **_result_to_dict(r),
+            "rationale": recommendation.rationale,
+            "pareto_frontier_count": len(recommendation.pareto_frontier),
+        }
+    print(json.dumps(payload, indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +509,8 @@ def _print_results_table(results: list) -> None:
 
     t = Table(box=box.SIMPLE, show_header=True, header_style="dim", padding=(0, 1))
     t.add_column("", width=3, justify="right")           # rank
-    t.add_column("backend", min_width=34)
+    t.add_column("backend", min_width=30)
+    t.add_column("bs", justify="right", width=4)
     t.add_column("p50", justify="right")
     t.add_column("p95", justify="right")
     t.add_column("req/s", justify="right")
@@ -450,6 +526,7 @@ def _print_results_table(results: list) -> None:
         row: list[str] = [
             f"[{s}]#{i + 1}[/{s}]",
             f"[{s}]{r.candidate.description}[/{s}]",
+            f"[dim]{r.batch_size}[/dim]",
             f"[{s}]{r.latency_p50_ms:.2f} ms[/{s}]",
             f"[dim]{r.latency_p95_ms:.2f} ms[/dim]",
             f"[dim]{r.throughput_rps:.0f}[/dim]",
@@ -466,6 +543,7 @@ def _print_results_table(results: list) -> None:
         row = [
             "[dim]—[/dim]",
             f"[dim]{r.candidate.description}[/dim]",
+            f"[dim]{r.batch_size}[/dim]",
             "[dim]—[/dim]", "[dim]—[/dim]", "[dim]—[/dim]", "[dim]—[/dim]",
         ]
         if has_accuracy:
@@ -489,6 +567,7 @@ def _print_recommendation(rec: object) -> None:
         else ""
     )
     stats = (
+        f"  [dim]batch[/dim]  {r.batch_size}\n"
         f"  [dim]p50[/dim]    [bold]{r.latency_p50_ms:.2f} ms[/bold]\n"
         f"  [dim]p95[/dim]    {r.latency_p95_ms:.2f} ms\n"
         f"  [dim]req/s[/dim]  [bold]{r.throughput_rps:.0f}[/bold]\n"
