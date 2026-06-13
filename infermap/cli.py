@@ -142,7 +142,7 @@ def benchmark(
             print(json.dumps({"error": pf.message, "category": "impossible"}, indent=2))
         raise typer.Exit(code=1)
     if pf.category == "unlikely" and not json_mode:
-        _prompt_unlikely_or_abort()
+        _prompt_unlikely_or_abort()  # no constraints to relax in bare benchmark
 
     from infermap.inspector import _load_model
     model = _load_model(model_path)
@@ -198,7 +198,7 @@ def optimize(
     with console.status("[bold green]Inspecting model..."):
         info = inspect_model(model_path, input_shape=shape)
 
-    pf = run_preflight(info, hw)
+    pf = run_preflight(info, hw, target_throughput=min_throughput_rps)
     if not json_mode:
         _print_preflight(pf)
     if pf.category == "impossible":
@@ -206,7 +206,8 @@ def optimize(
             print(json.dumps({"error": pf.message, "category": "impossible"}, indent=2))
         raise typer.Exit(code=1)
     if pf.category == "unlikely" and not json_mode:
-        _prompt_unlikely_or_abort()
+        if _prompt_unlikely_or_abort():
+            min_throughput_rps = None
 
     from infermap.inspector import _load_model
     model = _load_model(model_path)
@@ -408,14 +409,18 @@ def _print_header(label: str) -> None:
     console.print()
 
 
-def _prompt_unlikely_or_abort() -> None:
+def _prompt_unlikely_or_abort() -> bool:
+    """Prompt on 'unlikely' preflight. Returns True if the user chose to relax constraints."""
     console.print()
     console.print("  [yellow][1][/yellow] Benchmark anyway")
-    console.print("  [dim][2] Abort[/dim]")
+    console.print("  [yellow][2][/yellow] Relax constraint and benchmark")
+    console.print("  [dim][3] Abort[/dim]")
     choice = typer.prompt("\nChoice", default="1")
-    if choice.strip() != "1":
+    choice = choice.strip()
+    if choice == "3":
         raise typer.Exit(code=1)
     console.print()
+    return choice == "2"
 
 
 def _print_hardware(hw: object) -> None:
