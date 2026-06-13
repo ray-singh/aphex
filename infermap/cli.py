@@ -140,7 +140,7 @@ def benchmark(
     model = _load_model(model_path)
     model.eval()
 
-    calib = _load_calibration(calibration_data)
+    calib = _load_calibration(calibration_data, shape)
     candidates = generate_candidates(info, hw)
     results = _run_candidates(candidates, model, info, shape, batch_size, warmup, iters, timeout_s, calib)
     _print_results_table(results)
@@ -194,7 +194,7 @@ def optimize(
     model = _load_model(model_path)
     model.eval()
 
-    calib = _load_calibration(calibration_data)
+    calib = _load_calibration(calibration_data, shape)
     candidates = generate_candidates(info, hw)
     results = _run_candidates(candidates, model, info, shape, batch_size, 10, 100, timeout_s, calib)
     _print_results_table(results)
@@ -214,16 +214,59 @@ def optimize(
 # ---------------------------------------------------------------------------
 
 
-def _load_calibration(path: Optional[Path]) -> list | None:
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+_IMAGENET_MEAN = [0.485, 0.456, 0.406]
+_IMAGENET_STD = [0.229, 0.224, 0.225]
+_CALIB_MAX_SAMPLES = 32
+
+
+def _load_calibration(path: Optional[Path], input_shape: list[int]) -> list | None:
     if path is None:
         return None
+    if path.is_dir():
+        return _load_calibration_dir(path, input_shape)
     import torch
     raw = torch.load(path, weights_only=False)
     if isinstance(raw, torch.Tensor):
-        return [raw[i : i + 1] for i in range(min(raw.size(0), 32))]
+        return [raw[i : i + 1] for i in range(min(raw.size(0), _CALIB_MAX_SAMPLES))]
     if isinstance(raw, list):
-        return raw[:32]
+        return raw[:_CALIB_MAX_SAMPLES]
     return None
+
+
+def _load_calibration_dir(path: Path, input_shape: list[int]) -> list | None:
+    import torch
+    import torchvision.transforms.functional as TF
+    from PIL import Image
+
+    if len(input_shape) != 3:
+        err_console.print(
+            f"[yellow]Warning: --calibration-data directory requires a 3D input shape "
+            f"(C H W); got {input_shape}. Provide a .pt file for non-image inputs.[/yellow]"
+        )
+        return None
+
+    c, h, w = input_shape
+    files = sorted(f for f in path.iterdir() if f.suffix.lower() in _IMAGE_EXTENSIONS)
+    files = files[:_CALIB_MAX_SAMPLES]
+
+    if not files:
+        err_console.print(
+            f"[yellow]Warning: no image files found in {path} "
+            f"({', '.join(sorted(_IMAGE_EXTENSIONS))}).[/yellow]"
+        )
+        return None
+
+    tensors = []
+    for f in files:
+        img = Image.open(f).convert("RGB" if c == 3 else "L")
+        t = TF.to_tensor(img)                           # (C, H, W), values in [0, 1]
+        t = TF.resize(t, [h, w], antialias=True)        # resize to target spatial dims
+        if c == 3:
+            t = TF.normalize(t, _IMAGENET_MEAN, _IMAGENET_STD)
+        tensors.append(t.unsqueeze(0))                  # (1, C, H, W)
+
+    return tensors
 
 
 def _run_candidates(

@@ -1,6 +1,6 @@
 <p align="center">
-  <img src="docs/logo/lockup-light.svg#gh-light-mode-only" alt="aphex" height="80"/>
-  <img src="docs/logo/lockup-dark.svg#gh-dark-mode-only" alt="aphex" height="80"/>
+  <img src="docs/logo/lockup-light.svg#gh-light-mode-only" alt="aphex" height="120"/>
+  <img src="docs/logo/lockup-dark.svg#gh-dark-mode-only" alt="aphex" height="120"/>
 </p>
 
 A hardware-aware ML optimization and recommendation framework.
@@ -12,19 +12,14 @@ aphex profiles your hardware, inspects your PyTorch model, benchmarks every viab
 - **Hardware profiling**: detects CPU cores, RAM, CUDA GPUs, Apple MPS, and CoreML availability
 - **Model inspection**: parameter count, memory footprint (FP32/FP16), architecture family
 - **Pre-flight checks**: fast feasibility check before committing to a full benchmark run
-- **Multi-backend benchmarking**: PyTorch (FP32/FP16/BF16), ONNX Runtime (CPU/CUDA/CoreML), `torch.compile`
+- **Multi-backend benchmarking**: PyTorch (FP32/FP16/BF16), ONNX Runtime (CPU/CUDA/CoreML), `torch.compile`, INT8 quantization
+- **INT8 quantization**: dynamic quantization via PyTorch and ONNX Runtime, with optional accuracy-drop measurement against calibration data
 - **Pareto-optimal recommendation**: picks the best strategy for your objective (latency, throughput, or memory)
 
 ## Installation
 
 ```bash
 pip install aphex
-```
-
-For CUDA support:
-
-```bash
-pip install "aphex[cuda]"
 ```
 
 ## Quickstart
@@ -46,13 +41,15 @@ aphex optimize model.pt --input-shape 3,224,224 --objective latency
 ## Example output
 
 ```
-Running 5 candidates...
+Running 7 candidates...
 
   ✓ PyTorch FP32 CPU                    p50=  17.55 ms        57 req/s
   ✓ PyTorch FP32 MPS                    p50=   4.95 ms       202 req/s
   ✓ PyTorch FP16 MPS                    p50=   4.64 ms       215 req/s
   ✓ ONNX Runtime + CoreML               p50=   0.92 ms      1085 req/s
   ✓ PyTorch FP32 + torch.compile CPU    p50=   8.10 ms       123 req/s
+  ✓ PyTorch INT8 dynamic (CPU)          p50=   0.07 ms   acc drop=0.002%
+  ✓ ONNX Runtime INT8 (CPU)             p50=   0.01 ms   acc drop=0.003%
 ```
 
 ## CLI reference
@@ -75,6 +72,7 @@ Running 5 candidates...
 --max-latency-ms 5.0      Hard constraint on p50 latency
 --max-memory-mb 512       Hard constraint on peak memory
 --min-throughput-rps 200  Hard constraint on throughput
+--calibration-data PATH   .pt file or image directory for INT8 accuracy measurement
 ```
 
 ## Pipeline
@@ -110,6 +108,8 @@ model.pt + hardware
 | ONNX Runtime | CPU | FP32 |
 | ONNX Runtime + CoreML | Apple Silicon | FP32 |
 | ONNX Runtime | CUDA | FP32, FP16 |
+| PyTorch INT8 dynamic | CPU | INT8 |
+| ONNX Runtime INT8 | CPU | INT8 |
 
 ## Requirements
 
