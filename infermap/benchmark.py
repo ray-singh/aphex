@@ -17,6 +17,11 @@ _QUANT_BACKENDS = {"pytorch_int8_dynamic", "onnx_int8_cpu"}
 # Backends that require an eager nn.Module (not a ScriptModule): compile needs the
 # graph to be traceable by dynamo, and quantize_dynamic rewrites Linear submodules.
 _EAGER_BACKENDS = {"torch_compile_fp32", "pytorch_int8_dynamic"}
+# torch.compile spends its first-run budget on Dynamo graph compilation, which can
+# take several minutes for complex models. Give compile backends a longer timeout
+# so they aren't killed during compilation before they ever get to measure latency.
+_COMPILE_BACKENDS = {"torch_compile_fp32", "torch_compile_fp16", "torch_compile_bf16"}
+_COMPILE_TIMEOUT_S = 600.0
 
 
 def _ensure_quantization_engine() -> None:
@@ -111,6 +116,15 @@ def _serialize_model(
     """
     import io
     from infermap.inspector import _STUB_REGISTRY
+
+    # PyTorch 2.x fuses TransformerEncoderLayer into aten::_transformer_encoder_layer_fwd
+    # in eval mode when enable_nested_tensor=True (the default). That fused op is not
+    # implemented on MPS and can't be exported to ONNX opset 17, so any transformer
+    # model fails those backends. Disabling it here forces the standard unfused path
+    # (standard matmul + softmax) that all runtimes support. Correctness is unchanged.
+    for m in model.modules():
+        if isinstance(m, nn.TransformerEncoder):
+            m.enable_nested_tensor = False
 
     if isinstance(model, torch.jit.ScriptModule):
         buf = io.BytesIO()
@@ -251,8 +265,17 @@ def benchmark_candidate(
         ),
         daemon=True,
     )
+    # Compile backends spend their first forward pass doing Dynamo graph compilation,
+    # which can take several minutes. Use a longer deadline so they aren't killed
+    # before compilation finishes and actual inference has a chance to run.
+    effective_timeout = (
+        max(timeout_s, _COMPILE_TIMEOUT_S)
+        if candidate.backend in _COMPILE_BACKENDS
+        else timeout_s
+    )
+
     proc.start()
-    proc.join(timeout=timeout_s)
+    proc.join(timeout=effective_timeout)
 
     if proc.is_alive():
         proc.terminate()
@@ -267,7 +290,7 @@ def benchmark_candidate(
             throughput_rps=0.0,
             memory_mb=0.0,
             batch_size=batch_size,
-            error=f"timed out after {timeout_s:.0f}s",
+            error=f"timed out after {effective_timeout:.0f}s",
         )
 
     if not queue.empty():
