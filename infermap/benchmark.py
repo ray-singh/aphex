@@ -14,6 +14,9 @@ from infermap.inspector import ModelInfo
 _WARMUP_ITERS = 10
 _MEASURE_ITERS = 100
 _QUANT_BACKENDS = {"pytorch_int8_dynamic", "onnx_int8_cpu"}
+# Backends that require an eager nn.Module (not a ScriptModule): compile needs the
+# graph to be traceable by dynamo, and quantize_dynamic rewrites Linear submodules.
+_EAGER_BACKENDS = {"torch_compile_fp32", "pytorch_int8_dynamic"}
 
 
 def _ensure_quantization_engine() -> None:
@@ -90,26 +93,52 @@ class BenchmarkResult:
 def _serialize_model(
     model: nn.Module,
     input_shape: list[int] | None = None,
-) -> tuple[str, bytes]:
+    candidate: Any = None,
+) -> tuple[Any, ...]:
     """Serialize a model to bytes for cross-process transfer.
 
-    ScriptModules can't be pickled — they require torch.jit.save/load.
-    When input_shape is provided we attempt torch.jit.trace first, which
-    produces a self-contained ScriptModule that worker processes can load
-    without needing the original class definitions (e.g. custom .pkl models).
+    Returns a tuple whose first element is a kind tag:
+      "script"      — torch.jit ScriptModule; load with torch.jit.load
+      "module"      — regular nn.Module; load with torch.load
+      "stub_module" — nn.Module built from stub classes; includes stub specs
+                      as a third element so workers can recreate them before
+                      unpickling (avoids ModuleNotFoundError in spawned procs)
+
+    For backends that require an eager nn.Module (torch.compile, quantize_dynamic)
+    we cannot trace to a ScriptModule, so stub models go via "stub_module".
+    All other stub models are traced to a self-contained ScriptModule so workers
+    don't need the original class definitions.
     """
     import io
+    from infermap.inspector import _STUB_REGISTRY
 
     if isinstance(model, torch.jit.ScriptModule):
         buf = io.BytesIO()
         torch.jit.save(model, buf)
         return ("script", buf.getvalue())
 
+    needs_eager = (
+        candidate is not None
+        and hasattr(candidate, "backend")
+        and candidate.backend in _EAGER_BACKENDS
+    )
+
+    # Stub models sent to eager backends need the stub specs shipped alongside
+    # so worker processes can recreate the missing external classes.
+    if _STUB_REGISTRY and needs_eager:
+        buf = io.BytesIO()
+        torch.save(model, buf)
+        return ("stub_module", buf.getvalue(), list(_STUB_REGISTRY))
+
     if input_shape is not None:
         try:
             dummy = torch.zeros(1, *input_shape)
             with torch.no_grad():
-                traced = torch.jit.trace(model, dummy, strict=False)
+                # check_trace=False: nn.MultiheadAttention and similar modules
+                # produce different JIT IR variable names across invocations
+                # (the sanity check re-runs the forward and diffs the graphs).
+                # The computation is identical; only internal numbering varies.
+                traced = torch.jit.trace(model, dummy, strict=False, check_trace=False)
             buf = io.BytesIO()
             torch.jit.save(traced, buf)
             return ("script", buf.getvalue())
@@ -121,13 +150,44 @@ def _serialize_model(
     return ("module", buf.getvalue())
 
 
-def _deserialize_model(model_payload: tuple[str, bytes]) -> nn.Module:
-    import io
+def _recreate_stubs(specs: list[tuple[str, str, bool]]) -> None:
+    """Recreate stub classes in sys.modules so torch.load can unpickle stub models."""
+    import sys
+    import types
+    import torch.nn as nn
 
-    kind, data = model_payload
+    for mod_name, cls_name, is_nn_mod in specs:
+        if mod_name not in sys.modules:
+            sys.modules[mod_name] = types.ModuleType(mod_name)
+        stub_mod = sys.modules[mod_name]
+        if not hasattr(stub_mod, cls_name):
+            if is_nn_mod:
+                cls = type(cls_name, (nn.Module,), {
+                    "__init__": lambda self: nn.Module.__init__(self),
+                    "__module__": mod_name,
+                })
+            else:
+                cls = type(cls_name, (), {"__module__": mod_name})
+            setattr(stub_mod, cls_name, cls)
+
+
+def _deserialize_model(model_payload: tuple[Any, ...]) -> nn.Module:
+    import io
+    from infermap.inspector import _patch_stub_forwards
+
+    kind = model_payload[0]
+    data = model_payload[1]
     buf = io.BytesIO(data)
+
     if kind == "script":
         return torch.jit.load(buf)
+
+    if kind == "stub_module":
+        _recreate_stubs(model_payload[2])
+        model = torch.load(buf, weights_only=False)
+        _patch_stub_forwards(model)
+        return model
+
     return torch.load(buf, weights_only=False)
 
 
@@ -179,7 +239,7 @@ def benchmark_candidate(
             candidate, model, model_info, input_shape, batch_size, warmup_iters, measure_iters, calibration_inputs
         )
 
-    model_payload = _serialize_model(model, input_shape)
+    model_payload = _serialize_model(model, input_shape, candidate)
 
     ctx = mp.get_context("spawn")
     queue: mp.Queue[BenchmarkResult] = ctx.Queue()

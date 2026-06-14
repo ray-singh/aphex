@@ -10,6 +10,10 @@ from typing import Any, Literal
 ModelFamily = Literal["transformer", "cnn", "unknown"]
 Framework = Literal["pytorch", "unknown"]
 
+# (module_name, class_name, is_nn_module) for every stub class created by _StubPickle.
+# Workers that need to unpickle stub models read this to recreate the same classes.
+_STUB_REGISTRY: list[tuple[str, str, bool]] = []
+
 BYTES_PER_PARAM: dict[str, float] = {
     "fp32": 4.0,
     "fp16": 2.0,
@@ -169,7 +173,8 @@ class _StubPickle:
 
                 _nn_keywords = ("net", "block", "layer", "encoder",
                                 "decoder", "head", "embed", "attention")
-                if any(k in name.lower() for k in _nn_keywords):
+                is_nn = any(k in name.lower() for k in _nn_keywords)
+                if is_nn:
                     cls = type(name, (nn.Module,),
                                {"__init__": lambda self: nn.Module.__init__(self),
                                 "__module__": module})
@@ -177,6 +182,7 @@ class _StubPickle:
                     cls = type(name, (), {"__module__": module})
 
                 setattr(stub_mod, name, cls)
+                _STUB_REGISTRY.append((module, name, is_nn))
                 return cls
 
 
@@ -187,9 +193,11 @@ def _patch_stub_forwards(model: Any) -> None:
     which makes the model uncallable.  This function walks the module tree and
     injects concrete forward implementations based on the submodule names that
     are present after pickle restoration.
-    """
-    import types as _types
 
+    Forwards are attached to the CLASS (not the instance) so that torch.compile /
+    Dynamo, deepcopy, and quantize_dynamic all behave correctly — these tools
+    expect forward to be a class-level method, not an instance attribute.
+    """
     import torch
     import torch.nn as nn
 
@@ -221,7 +229,7 @@ def _patch_stub_forwards(model: Any) -> None:
                     residual = self.downsample(x)
                 return self.relu(out + residual)
 
-            module.forward = _types.MethodType(_tcn_block_fwd, module)
+            type(module).forward = _tcn_block_fwd
 
         # TCN/CNN trunk with dual prediction heads
         elif "network" in sub and "rv_head_linear" in sub and "shock_head" in sub:
@@ -230,7 +238,7 @@ def _patch_stub_forwards(model: Any) -> None:
                 out = out[:, :, -1]  # last time-step
                 return self.rv_head_linear(out), self.shock_head(out)
 
-            module.forward = _types.MethodType(_tcn_net_fwd, module)
+            type(module).forward = _tcn_net_fwd
 
         # Transformer trunk with CLS token and dual prediction heads
         elif "input_proj" in sub and "encoder" in sub and "rv_head_linear" in sub:
@@ -241,13 +249,17 @@ def _patch_stub_forwards(model: Any) -> None:
                 b = x.shape[0]
                 cls = self.cls_token.expand(b, -1, -1)
                 x = torch.cat([cls, x], dim=1)
-                pos = torch.arange(x.shape[1], device=x.device)
-                x = x + self.pos_emb(pos).unsqueeze(0)
+                # Access the embedding weight table directly rather than calling
+                # pos_emb(arange(n)): avoids a dynamic torch.arange op that bakes
+                # the current device into the trace, breaking MPS/CoreML export.
+                # pos_emb.weight[:n] is mathematically identical and lives on the
+                # model's device, so it traces cleanly across devices.
+                x = x + self.pos_emb.weight[:x.shape[1]].unsqueeze(0)
                 x = self.encoder(x)
                 out = x[:, 0]
                 return self.rv_head_linear(out), self.shock_head(out)
 
-            module.forward = _types.MethodType(_transformer_net_fwd, module)
+            type(module).forward = _transformer_net_fwd
 
 
 # Layer-name heuristics for family detection
