@@ -6,10 +6,8 @@ import gc
 import time
 from dataclasses import dataclass
 from typing import Any
-
 import torch
 import torch.nn as nn
-
 from infermap.candidates import DeploymentCandidate
 from infermap.inspector import ModelInfo
 
@@ -33,6 +31,45 @@ def _ensure_quantization_engine() -> None:
             torch.backends.quantized.engine = "fbgemm"
 
 
+class _CompatDynamicLinear(torch.ao.nn.quantized.dynamic.Linear):
+    """DynamicQuantizedLinear with .weight and .bias as dequantized-tensor properties.
+
+    Some architectures (e.g. Swin-T shifted-window attention) bypass nn.Linear.forward
+    and call F.linear(x, submodule.weight, submodule.bias) directly. The base class
+    exposes both as bound methods (not tensors) and the packed weight is qint8, neither
+    of which F.linear accepts. Returning a dequantized float tensor lets those call
+    sites work. Modules called through forward() still use the INT8 kernel path.
+    """
+
+    @property  # type: ignore[override]
+    def weight(self) -> torch.Tensor:
+        return torch.dequantize(self._packed_params._weight_bias()[0])
+
+    @property  # type: ignore[override]
+    def bias(self) -> torch.Tensor | None:
+        return self._packed_params._weight_bias()[1]
+
+
+def _safe_quantize_dynamic(model: nn.Module) -> nn.Module:
+    """Quantize all nn.Linear modules, then patch DynamicQuantizedLinear.weight
+    to be a property so models that access .weight directly (e.g. Swin-T) still work.
+    """
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        qm = torch.ao.quantization.quantize_dynamic(model, {nn.Linear}, dtype=torch.qint8)
+
+    # Change class in-place on every DynamicQuantizedLinear instance so .weight
+    # returns a Tensor rather than a bound method.
+    base_cls = torch.ao.nn.quantized.dynamic.Linear
+    for mod in qm.modules():
+        if type(mod) is base_cls:
+            mod.__class__ = _CompatDynamicLinear
+
+    return qm
+
+
 @dataclass
 class BenchmarkResult:
     candidate: DeploymentCandidate
@@ -50,11 +87,16 @@ class BenchmarkResult:
         return self.error is None
 
 
-def _serialize_model(model: nn.Module) -> tuple[str, bytes]:
+def _serialize_model(
+    model: nn.Module,
+    input_shape: list[int] | None = None,
+) -> tuple[str, bytes]:
     """Serialize a model to bytes for cross-process transfer.
 
     ScriptModules can't be pickled — they require torch.jit.save/load.
-    Regular nn.Module instances are pickled normally via the 'module' path.
+    When input_shape is provided we attempt torch.jit.trace first, which
+    produces a self-contained ScriptModule that worker processes can load
+    without needing the original class definitions (e.g. custom .pkl models).
     """
     import io
 
@@ -62,6 +104,18 @@ def _serialize_model(model: nn.Module) -> tuple[str, bytes]:
         buf = io.BytesIO()
         torch.jit.save(model, buf)
         return ("script", buf.getvalue())
+
+    if input_shape is not None:
+        try:
+            dummy = torch.zeros(1, *input_shape)
+            with torch.no_grad():
+                traced = torch.jit.trace(model, dummy, strict=False)
+            buf = io.BytesIO()
+            torch.jit.save(traced, buf)
+            return ("script", buf.getvalue())
+        except Exception:
+            pass  # fall through to regular pickle path
+
     buf = io.BytesIO()
     torch.save(model, buf)
     return ("module", buf.getvalue())
@@ -125,7 +179,7 @@ def benchmark_candidate(
             candidate, model, model_info, input_shape, batch_size, warmup_iters, measure_iters, calibration_inputs
         )
 
-    model_payload = _serialize_model(model)
+    model_payload = _serialize_model(model, input_shape)
 
     ctx = mp.get_context("spawn")
     queue: mp.Queue[BenchmarkResult] = ctx.Queue()
@@ -314,9 +368,7 @@ def _prepare(
                 "Save an eager nn.Module instead of a scripted one."
             )
         _ensure_quantization_engine()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            m = torch.ao.quantization.quantize_dynamic(m, {torch.nn.Linear}, dtype=torch.qint8)
+        m = _safe_quantize_dynamic(m)
         weight_mb = weight_mb / 4  # linear weights stored as INT8, ~4x smaller than FP32
     elif candidate.backend in ("onnx_cpu", "onnx_cuda", "onnx_coreml"):
         m, dummy = _prepare_onnx(candidate, m, dummy, device)
@@ -411,11 +463,7 @@ def _measure_accuracy_drop(
 
         if candidate.backend == "pytorch_int8_dynamic":
             _ensure_quantization_engine()
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                quant_model = torch.ao.quantization.quantize_dynamic(
-                    copy.deepcopy(model).cpu().eval(), {torch.nn.Linear}, dtype=torch.qint8
-                )
+            quant_model = _safe_quantize_dynamic(copy.deepcopy(model).cpu().eval())
             with torch.no_grad():
                 for inp in calibration_inputs:
                     out = quant_model(inp.float().cpu())

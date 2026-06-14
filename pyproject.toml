@@ -49,10 +49,12 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not integration'"
 markers = [
     "requires_cuda: skips if CUDA is not available",
     "requires_mps: skips if MPS is not available",
     "requires_cpu: always runs (CPU path)",
+    "integration: real-model tests that download weights; excluded by default — run with: pytest -m integration",
 ]
 
 [dependency-groups]

@@ -54,6 +54,13 @@ def recommend(
         candidates = passing
 
     ranked = rank_by_objective(candidates, objective)
+    if not ranked:
+        errors = list({r.error for r in results if not r.ok and r.error})[:3]
+        error_summary = "; ".join(errors) if errors else "unknown reason"
+        raise RuntimeError(
+            f"No successful benchmark results — all {len(results)} candidate(s) failed. "
+            f"Errors: {error_summary}"
+        )
     best = ranked[0]
 
     rationale = _build_rationale(best, objective, max_latency_ms, max_memory_mb, min_throughput_rps)

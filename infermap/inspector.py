@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pickle
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -77,10 +78,13 @@ def inspect_model(model_or_path: Any, input_shape: list[int] | None = None) -> M
 
 
 def _load_model(path: Path) -> Any:
+    import io
+    import pickle
     import zipfile
 
     import torch
     import torch.nn as nn
+    import torch.storage as _ts
 
     # TorchScript archives are ZIP files with a specific marker; load them directly
     # to avoid a UserWarning from torch.load's auto-dispatch.
@@ -90,13 +94,160 @@ def _load_model(path: Path) -> Any:
         except Exception:
             pass  # fall through to torch.load for non-script zip saves
 
-    obj = torch.load(path, map_location="cpu", weights_only=False)
-    if isinstance(obj, nn.Module):
-        return obj
-    raise ValueError(
-        f"Loaded object from {path} is not an nn.Module. "
-        "Pass a full model (not just a state dict) or load the architecture first."
-    )
+    # Some pickles store tensors as embedded byte buffers via _load_from_bytes,
+    # which bypasses the outer torch.load's map_location (e.g. models saved on CUDA).
+    # Patch it for the duration of this load so all storages land on CPU.
+    _orig_lfb = _ts._load_from_bytes
+
+    def _lfb_cpu(b: bytes) -> Any:
+        return torch.load(io.BytesIO(b), map_location="cpu", weights_only=False)
+
+    _ts._load_from_bytes = _lfb_cpu
+    try:
+        # torch.load handles .pt / .pth (legacy binary and new ZIP formats).
+        # Plain Python pickles (.pkl) don't have the torch magic number header,
+        # so we fall back to pickle.load with our stub Unpickler for those.
+        try:
+            obj = torch.load(path, map_location="cpu", weights_only=False,
+                             pickle_module=_StubPickle)
+        except RuntimeError:
+            with open(path, "rb") as fh:
+                obj = _StubPickle.Unpickler(fh).load()
+    finally:
+        _ts._load_from_bytes = _orig_lfb
+
+    # Some saved objects are non-Module wrappers (e.g. training harnesses) that
+    # hold the actual network under a `.net` attribute.  Check this first so that
+    # stub nn.Module wrappers don't shadow the real sub-network.
+    if hasattr(obj, "net") and isinstance(getattr(obj, "net", None), nn.Module):
+        model = obj.net  # type: ignore[union-attr]
+    elif isinstance(obj, nn.Module):
+        model = obj
+    else:
+        raise ValueError(
+            f"Loaded object from {path} is not an nn.Module. "
+            "Pass a full model (not just a state dict) or load the architecture first."
+        )
+
+    # Stub classes created by _StubPickle have no forward() — inject best-effort
+    # implementations so the model can be called and traced for benchmarking.
+    _patch_stub_forwards(model)
+    return model
+
+
+class _StubPickle:
+    """pickle_module shim: stubs out missing external classes so torch.load
+    can reconstruct objects from pickles that depend on unavailable packages."""
+
+    HIGHEST_PROTOCOL = pickle.HIGHEST_PROTOCOL
+    loads = staticmethod(pickle.loads)
+    PickleError = pickle.PickleError
+    PicklingError = pickle.PicklingError
+    UnpicklingError = pickle.UnpicklingError
+
+    @staticmethod
+    def load(f: Any, **kwargs: Any) -> Any:
+        return _StubPickle.Unpickler(f).load()
+
+    class Unpickler(pickle.Unpickler):
+        def find_class(self, module: str, name: str) -> Any:
+            try:
+                return super().find_class(module, name)
+            except (ModuleNotFoundError, AttributeError):
+                import sys
+                import types
+                import torch.nn as nn
+
+                # Ensure the stub module exists in sys.modules so that
+                # torch.save can later find the class for pickling.
+                if module not in sys.modules:
+                    sys.modules[module] = types.ModuleType(module)
+
+                stub_mod = sys.modules[module]
+                if hasattr(stub_mod, name):
+                    return getattr(stub_mod, name)  # type: ignore[no-any-return]
+
+                _nn_keywords = ("net", "block", "layer", "encoder",
+                                "decoder", "head", "embed", "attention")
+                if any(k in name.lower() for k in _nn_keywords):
+                    cls = type(name, (nn.Module,),
+                               {"__init__": lambda self: nn.Module.__init__(self),
+                                "__module__": module})
+                else:
+                    cls = type(name, (), {"__module__": module})
+
+                setattr(stub_mod, name, cls)
+                return cls
+
+
+def _patch_stub_forwards(model: Any) -> None:
+    """Inject best-effort forward() into stub nn.Modules that have none.
+
+    Stub classes created by _StubPickle.Unpickler lack a forward() definition,
+    which makes the model uncallable.  This function walks the module tree and
+    injects concrete forward implementations based on the submodule names that
+    are present after pickle restoration.
+    """
+    import types as _types
+
+    import torch
+    import torch.nn as nn
+
+    def _is_stub(m: nn.Module) -> bool:
+        return "forward" not in type(m).__dict__
+
+    for module in model.modules():
+        if not _is_stub(module):
+            continue
+
+        sub = set(module._modules)
+
+        # TCN-style residual block: conv1, conv2, relu (drop/downsample optional).
+        # Causal TCNs pad both sides but only use the causal (left-padded) portion,
+        # so we clip each conv output back to the original sequence length.
+        if {"conv1", "conv2", "relu"}.issubset(sub):
+            def _tcn_block_fwd(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
+                residual = x
+                L = x.shape[2]
+                out = self.conv1(x)[:, :, :L]
+                out = self.relu(out)
+                if "drop" in self._modules:
+                    out = self.drop(out)
+                out = self.conv2(out)[:, :, :L]
+                out = self.relu(out)
+                if "drop" in self._modules:
+                    out = self.drop(out)
+                if "downsample" in self._modules:
+                    residual = self.downsample(x)
+                return self.relu(out + residual)
+
+            module.forward = _types.MethodType(_tcn_block_fwd, module)
+
+        # TCN/CNN trunk with dual prediction heads
+        elif "network" in sub and "rv_head_linear" in sub and "shock_head" in sub:
+            def _tcn_net_fwd(self: nn.Module, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+                out = self.network(x)
+                out = out[:, :, -1]  # last time-step
+                return self.rv_head_linear(out), self.shock_head(out)
+
+            module.forward = _types.MethodType(_tcn_net_fwd, module)
+
+        # Transformer trunk with CLS token and dual prediction heads
+        elif "input_proj" in sub and "encoder" in sub and "rv_head_linear" in sub:
+            def _transformer_net_fwd(
+                self: nn.Module, x: torch.Tensor
+            ) -> tuple[torch.Tensor, torch.Tensor]:
+                x = self.input_proj(x)
+                b = x.shape[0]
+                cls = self.cls_token.expand(b, -1, -1)
+                x = torch.cat([cls, x], dim=1)
+                pos = torch.arange(x.shape[1], device=x.device)
+                x = x + self.pos_emb(pos).unsqueeze(0)
+                x = self.encoder(x)
+                out = x[:, 0]
+                return self.rv_head_linear(out), self.shock_head(out)
+
+            module.forward = _types.MethodType(_transformer_net_fwd, module)
 
 
 # Layer-name heuristics for family detection

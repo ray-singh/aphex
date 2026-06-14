@@ -7,6 +7,7 @@ import torch
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "requires_cuda: skip if CUDA unavailable")
     config.addinivalue_line("markers", "requires_mps: skip if MPS unavailable")
+    config.addinivalue_line("markers", "integration: real-model tests; run with pytest -m integration")
 
 
 requires_cuda = pytest.mark.skipif(
