@@ -1,7 +1,6 @@
 """CLI entry point — Typer app with Rich output."""
 
 from __future__ import annotations
-
 import json
 import os
 from pathlib import Path
@@ -248,6 +247,8 @@ def optimize(
 
     if output and str(output) != "":
         from infermap.deployment import build_config, write_yaml
+        from infermap.system_recommender import recommend_system_config
+        sys_cfg = recommend_system_config(rec, info, hw, objective=objective)
         cfg = build_config(
             rec, info, hw,
             objective=objective,
@@ -255,6 +256,7 @@ def optimize(
             max_memory_mb=max_memory_mb,
             min_throughput_rps=min_throughput_rps,
             max_quality_loss=max_quality_loss,
+            system=sys_cfg,
         )
         write_yaml(cfg, output)
 

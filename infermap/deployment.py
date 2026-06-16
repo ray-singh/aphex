@@ -1,15 +1,14 @@
 """Deployment config generation — serializes the optimize recommendation to YAML."""
 
 from __future__ import annotations
-
 import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
 from infermap.inspector import ModelInfo
 from infermap.profiler import HardwareProfile
 from infermap.recommender import Recommendation
+from infermap.system_recommender import SystemConfig
 
 
 @dataclass
@@ -46,6 +45,8 @@ class DeploymentConfig:
     max_quality_loss: float | None
     # meta
     generated_at: str
+    # system-level serving config (optional)
+    system: SystemConfig | None = None
 
 
 def build_config(
@@ -57,6 +58,7 @@ def build_config(
     max_memory_mb: float | None = None,
     min_throughput_rps: float | None = None,
     max_quality_loss: float | None = None,
+    system: SystemConfig | None = None,
 ) -> DeploymentConfig:
     r = rec.result
     return DeploymentConfig(
@@ -86,6 +88,7 @@ def build_config(
         min_throughput_rps=min_throughput_rps,
         max_quality_loss=max_quality_loss,
         generated_at=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        system=system,
     )
 
 
@@ -130,6 +133,7 @@ def config_to_dict(config: DeploymentConfig) -> dict[str, Any]:
             "generated_at": config.generated_at,
             "tool": "aphex",
         },
+        "serving": _system_config_dict(config.system),
     }
 
 
@@ -157,6 +161,28 @@ def _section_to_yaml(d: dict[str, Any], indent: int = 0) -> str:
         else:
             parts.append(f"{pad}{key}: {_scalar(value)}")
     return "\n".join(parts)
+
+
+def _system_config_dict(system: SystemConfig | None) -> dict[str, Any]:
+    if system is None:
+        return {k: None for k in (
+            "max_safe_batch_size", "recommended_batch_size", "dynamic_batching",
+            "num_workers", "tensor_parallel_size", "kv_cache_fraction",
+            "continuous_batching", "prefill_chunk_size", "kv_cache_dtype",
+            "enable_result_cache",
+        )}
+    return {
+        "max_safe_batch_size": system.max_safe_batch_size,
+        "recommended_batch_size": system.recommended_batch_size,
+        "dynamic_batching": system.dynamic_batching,
+        "num_workers": system.num_workers,
+        "tensor_parallel_size": system.tensor_parallel_size,
+        "kv_cache_fraction": system.kv_cache_fraction,
+        "continuous_batching": system.continuous_batching,
+        "prefill_chunk_size": system.prefill_chunk_size,
+        "kv_cache_dtype": system.kv_cache_dtype,
+        "enable_result_cache": system.enable_result_cache,
+    }
 
 
 def _scalar(value: Any) -> str:

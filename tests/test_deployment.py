@@ -170,7 +170,7 @@ def test_build_config_generated_at_is_iso8601() -> None:
 
 def test_config_to_dict_has_required_sections() -> None:
     d = config_to_dict(build_config(_rec(), _info(), _hw()))
-    assert set(d.keys()) == {"model", "hardware", "recommendation", "performance", "constraints", "meta"}
+    assert set(d.keys()) == {"model", "hardware", "recommendation", "performance", "constraints", "meta", "serving"}
 
 
 def test_config_to_dict_model_section() -> None:
