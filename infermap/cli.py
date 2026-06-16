@@ -189,6 +189,10 @@ def optimize(
         None, "--max-quality-loss",
         help="Maximum acceptable quality loss vs FP32 baseline (0.0–1.0). Requires --calibration-data.",
     ),
+    output: Optional[Path] = typer.Option(
+        Path("deployment.yaml"), "--output",
+        help="Write deployment config to this path (default: deployment.yaml). Pass '' to skip.",
+    ),
     format_: str = typer.Option("table", "--format", help="Output format: table | json"),
 ) -> None:
     """Benchmark all candidates and recommend the optimal deployment strategy."""
@@ -241,11 +245,26 @@ def optimize(
         min_throughput_rps=min_throughput_rps,
         max_quality_loss=max_quality_loss,
     )
+
+    if output and str(output) != "":
+        from infermap.deployment import build_config, write_yaml
+        cfg = build_config(
+            rec, info, hw,
+            objective=objective,
+            max_latency_ms=max_latency_ms,
+            max_memory_mb=max_memory_mb,
+            min_throughput_rps=min_throughput_rps,
+            max_quality_loss=max_quality_loss,
+        )
+        write_yaml(cfg, output)
+
     if json_mode:
         _emit_json(results, rec)
     else:
         _print_results_table(results)
         _print_recommendation(rec)
+        if output and str(output) != "":
+            console.print(f"  [dim]deployment config written to[/dim] [bold]{output}[/bold]\n")
 
 
 # ---------------------------------------------------------------------------
