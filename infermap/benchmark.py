@@ -13,7 +13,15 @@ from infermap.inspector import ModelInfo
 
 _WARMUP_ITERS = 10
 _MEASURE_ITERS = 100
-_QUANT_BACKENDS = {"pytorch_int8_dynamic", "onnx_int8_cpu"}
+_ACCURACY_SENSITIVE_BACKENDS = {
+    "pytorch_fp16",
+    "pytorch_bf16",
+    "pytorch_int8_dynamic",
+    "onnx_int8_cpu",
+    "tensorrt_fp16",
+    "tensorrt_int8",
+    "openvino_int8",
+}
 # Backends that require an eager nn.Module (not a ScriptModule): compile needs the
 # graph to be traceable by dynamo, and quantize_dynamic rewrites Linear submodules.
 _EAGER_BACKENDS = {"torch_compile_fp32", "pytorch_int8_dynamic"}
@@ -22,6 +30,12 @@ _EAGER_BACKENDS = {"torch_compile_fp32", "pytorch_int8_dynamic"}
 # so they aren't killed during compilation before they ever get to measure latency.
 _COMPILE_BACKENDS = {"torch_compile_fp32", "torch_compile_fp16", "torch_compile_bf16"}
 _COMPILE_TIMEOUT_S = 600.0
+# Backends where precision is controlled by the external runtime, not by pre-converting
+# the nn.Module. We export FP32 ONNX and let TRT/OV handle precision internally.
+_TRT_OV_BACKENDS = frozenset({
+    "tensorrt_fp32", "tensorrt_fp16", "tensorrt_int8",
+    "openvino_fp32", "openvino_int8",
+})
 
 
 def _ensure_quantization_engine() -> None:
@@ -93,6 +107,58 @@ class BenchmarkResult:
     @property
     def ok(self) -> bool:
         return self.error is None
+
+
+class _TensorRTRunner:
+    """Wraps a TensorRT execution context as a callable (tensor → tensor)."""
+
+    def __init__(self, engine_bytes: bytes) -> None:
+        import tensorrt as trt
+
+        logger = trt.Logger(trt.Logger.ERROR)
+        runtime = trt.Runtime(logger)
+        self._engine = runtime.deserialize_cuda_engine(engine_bytes)
+        self._context = self._engine.create_execution_context()
+        self._use_v10_api = int(trt.__version__.split(".")[0]) >= 10
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        x_cuda = x.to("cuda").float().contiguous()
+        return self._run_v10(x_cuda) if self._use_v10_api else self._run_v8(x_cuda)
+
+    def _run_v10(self, x: torch.Tensor) -> torch.Tensor:
+        self._context.set_input_shape("input", tuple(x.shape))
+        out_shape = tuple(self._context.get_tensor_shape("output"))
+        out = torch.empty(out_shape, device="cuda", dtype=torch.float32)
+        self._context.set_tensor_address("input", x.data_ptr())
+        self._context.set_tensor_address("output", out.data_ptr())
+        self._context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+        return out
+
+    def _run_v8(self, x: torch.Tensor) -> torch.Tensor:
+        engine = self._engine
+        in_idx = engine.get_binding_index("input")
+        out_idx = engine.get_binding_index("output")
+        self._context.set_binding_shape(in_idx, tuple(x.shape))
+        out_shape = tuple(self._context.get_binding_shape(out_idx))
+        out = torch.empty(out_shape, device="cuda", dtype=torch.float32)
+        bindings: list[int | None] = [None] * engine.num_bindings
+        bindings[in_idx] = x.data_ptr()
+        bindings[out_idx] = out.data_ptr()
+        self._context.execute_async_v2(
+            bindings=bindings, stream_handle=torch.cuda.current_stream().cuda_stream
+        )
+        return out
+
+
+class _OpenVINORunner:
+    """Wraps an OpenVINO compiled model as a callable (tensor → tensor)."""
+
+    def __init__(self, compiled_model: Any) -> None:
+        self._infer_req = compiled_model.create_infer_request()
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        results = self._infer_req.infer({"input": x.cpu().float().numpy()})
+        return torch.from_numpy(next(iter(results.values())))
 
 
 def _serialize_model(
@@ -348,10 +414,10 @@ def _run_benchmark(
     device = torch.device(candidate.device)
 
     accuracy_drop: float | None = None
-    if calibration_inputs and candidate.backend in _QUANT_BACKENDS:
+    if calibration_inputs and candidate.backend in _ACCURACY_SENSITIVE_BACKENDS:
         accuracy_drop = _measure_accuracy_drop(candidate, model, calibration_inputs)
 
-    prepared_model, dummy_input, weight_mb = _prepare(candidate, model, input_shape, batch_size, device)
+    prepared_model, dummy_input, weight_mb = _prepare(candidate, model, input_shape, batch_size, device, calibration_inputs)
 
     timings_ms = _time_model(prepared_model, dummy_input, device, warmup_iters, measure_iters)
     memory_mb = _measure_memory(prepared_model, dummy_input, device, weight_mb)
@@ -402,6 +468,7 @@ def _prepare(
     input_shape: list[int],
     batch_size: int,
     device: torch.device,
+    calibration_inputs: list[Any] | None = None,
 ) -> tuple[Any, torch.Tensor, float]:
     import copy
     import warnings
@@ -424,7 +491,8 @@ def _prepare(
         warnings.filterwarnings("ignore", message="The .grad attribute of a Tensor that is not a leaf")
         m = copy.deepcopy(model).to(device)
         m.eval()
-        if candidate.dtype in ("fp16", "bf16"):
+        # TRT/OV handle precision internally; keep the model FP32 for ONNX export.
+        if candidate.dtype in ("fp16", "bf16") and candidate.backend not in _TRT_OV_BACKENDS:
             m = m.to(torch_dtype)
 
     if candidate.backend == "torch_compile_fp32":
@@ -458,6 +526,10 @@ def _prepare(
     elif candidate.backend == "onnx_int8_cpu":
         m, dummy = _prepare_onnx_int8(m, dummy)
         weight_mb = weight_mb / 4
+    elif candidate.backend in ("tensorrt_fp32", "tensorrt_fp16", "tensorrt_int8"):
+        m, dummy, weight_mb = _prepare_tensorrt(candidate, m, dummy, calibration_inputs)
+    elif candidate.backend in ("openvino_fp32", "openvino_int8"):
+        m, dummy, weight_mb = _prepare_openvino(candidate, m, dummy, calibration_inputs)
 
     return m, dummy, weight_mb
 
@@ -518,6 +590,120 @@ def _prepare_onnx_int8(model: Any, dummy: torch.Tensor) -> tuple[Any, torch.Tens
         sess = ort.InferenceSession(str(quant_path), providers=["CPUExecutionProvider"])
 
     return sess, dummy.to("cpu").float()
+
+
+def _make_trt_calibrator(calibration_inputs: list[Any]) -> Any:
+    """Return a TensorRT IInt8MinMaxCalibrator backed by the given tensors."""
+    import tensorrt as trt
+
+    class _Calibrator(trt.IInt8MinMaxCalibrator):
+        def __init__(self) -> None:
+            super().__init__()
+            self._batches = [x.float().cuda().contiguous() for x in calibration_inputs]
+            self._idx = 0
+
+        def get_batch_size(self) -> int:
+            return self._batches[0].shape[0] if self._batches else 1
+
+        def get_batch(self, names: list[str]) -> list[int] | None:
+            if self._idx >= len(self._batches):
+                return None
+            data = self._batches[self._idx]
+            self._idx += 1
+            return [data.data_ptr()]
+
+        def read_calibration_cache(self) -> bytes | None:
+            return None
+
+        def write_calibration_cache(self, cache: bytes) -> None:
+            pass
+
+    return _Calibrator()
+
+
+def _prepare_tensorrt(
+    candidate: DeploymentCandidate,
+    model: Any,
+    dummy: torch.Tensor,
+    calibration_inputs: list[Any] | None,
+) -> tuple["_TensorRTRunner", torch.Tensor, float]:
+    """Build a TensorRT engine from an nn.Module; return (runner, dummy, engine_mb)."""
+    import tensorrt as trt
+
+    if candidate.backend == "tensorrt_int8" and not calibration_inputs:
+        raise RuntimeError(
+            "tensorrt_int8 requires calibration data. "
+            "Re-run with --calibration-data to supply representative inputs."
+        )
+
+    # Always export FP32 ONNX; TRT precision flags control internal compute type.
+    onnx_bytes = _export_to_onnx_bytes(model.cpu().eval(), dummy.float().cpu())
+
+    logger = trt.Logger(trt.Logger.ERROR)
+    builder = trt.Builder(logger)
+    flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    network = builder.create_network(flags)
+    parser = trt.OnnxParser(network, logger)
+    if not parser.parse(onnx_bytes):
+        errors = [parser.get_error(i).desc() for i in range(parser.num_errors)]
+        raise RuntimeError(f"TensorRT ONNX parse failed: {'; '.join(errors)}")
+
+    config = builder.create_builder_config()
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+
+    if candidate.backend == "tensorrt_fp16":
+        config.set_flag(trt.BuilderFlag.FP16)
+    elif candidate.backend == "tensorrt_int8":
+        config.set_flag(trt.BuilderFlag.INT8)
+        config.int8_calibrator = _make_trt_calibrator(calibration_inputs)  # type: ignore[arg-type]
+
+    plan = builder.build_serialized_network(network, config)
+    if plan is None:
+        raise RuntimeError("TensorRT engine build failed — check GPU capabilities.")
+
+    engine_bytes = bytes(plan)
+    runner = _TensorRTRunner(engine_bytes)
+    return runner, dummy.float().cuda().contiguous(), len(engine_bytes) / 1e6
+
+
+def _prepare_openvino(
+    candidate: DeploymentCandidate,
+    model: Any,
+    dummy: torch.Tensor,
+    calibration_inputs: list[Any] | None,
+) -> tuple["_OpenVINORunner", torch.Tensor, float]:
+    """Convert an nn.Module to an OpenVINO compiled model; return (runner, dummy, model_mb)."""
+    import io
+
+    import openvino as ov
+
+    if candidate.backend == "openvino_int8" and not calibration_inputs:
+        raise RuntimeError(
+            "openvino_int8 requires calibration data. "
+            "Re-run with --calibration-data to supply representative inputs."
+        )
+
+    onnx_bytes = _export_to_onnx_bytes(model.cpu().eval(), dummy.float().cpu())
+    ov_model = ov.convert_model(io.BytesIO(onnx_bytes))
+
+    if candidate.backend == "openvino_int8":
+        try:
+            import nncf
+
+            def _transform(item: Any) -> dict:
+                return {"input": item.float().cpu().numpy()}
+
+            dataset = nncf.Dataset(calibration_inputs, _transform)
+            ov_model = nncf.quantize(ov_model, dataset)
+        except ImportError as exc:
+            raise RuntimeError(
+                "openvino_int8 requires the nncf package: pip install nncf"
+            ) from exc
+
+    core = ov.Core()
+    compiled = core.compile_model(ov_model, "CPU")
+    runner = _OpenVINORunner(compiled)
+    return runner, dummy.float().cpu(), len(onnx_bytes) / 1e6
 
 
 def _measure_accuracy_drop(
@@ -586,6 +772,37 @@ def _measure_accuracy_drop(
             for inp in calibration_inputs:
                 out = sess.run(None, {"input": inp.float().cpu().numpy()})[0]
                 quant_outs.append(torch.tensor(out).flatten().float())
+
+        elif candidate.backend in ("pytorch_fp16", "pytorch_bf16"):
+            torch_dtype = torch.float16 if "fp16" in candidate.backend else torch.bfloat16
+            try:
+                half_model = copy.deepcopy(model).cpu().to(torch_dtype).eval()
+                with torch.no_grad():
+                    for inp in calibration_inputs:
+                        out = half_model(inp.float().cpu().to(torch_dtype))
+                        quant_outs.append(out.detach().flatten().float())
+            except Exception:
+                return None
+
+        elif candidate.backend == "tensorrt_fp16":
+            # Use pytorch_fp16 as a proxy — same numerical precision reduction.
+            try:
+                half_model = copy.deepcopy(model).cpu().to(torch.float16).eval()
+                with torch.no_grad():
+                    for inp in calibration_inputs:
+                        out = half_model(inp.float().cpu().to(torch.float16))
+                        quant_outs.append(out.detach().flatten().float())
+            except Exception:
+                return None
+
+        elif candidate.backend in ("tensorrt_int8", "openvino_int8"):
+            # Use pytorch_int8_dynamic as a proxy for quantization accuracy impact.
+            _ensure_quantization_engine()
+            quant_model = _safe_quantize_dynamic(copy.deepcopy(model).cpu().eval())
+            with torch.no_grad():
+                for inp in calibration_inputs:
+                    out = quant_model(inp.float().cpu())
+                    quant_outs.append(out.detach().flatten().float())
 
         if not quant_outs:
             return None
@@ -659,6 +876,11 @@ def _measure_memory(
 ) -> float:
     """Return model memory in MB (weights + peak activations where measurable)."""
     import onnxruntime as ort
+
+    # TRT and OV allocate device memory outside PyTorch's allocator.
+    # Return the engine/model size set during _prepare as a proxy.
+    if isinstance(model, (_TensorRTRunner, _OpenVINORunner)):
+        return weight_mb
 
     if device.type == "cuda":
         # CUDA tracks peak allocation precisely — includes weights + activations.

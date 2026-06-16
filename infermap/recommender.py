@@ -22,6 +22,7 @@ def recommend(
     max_latency_ms: float | None = None,
     max_memory_mb: float | None = None,
     min_throughput_rps: float | None = None,
+    max_quality_loss: float | None = None,
 ) -> Recommendation:
     """
     Select the best deployment strategy subject to optional constraints.
@@ -32,6 +33,8 @@ def recommend(
         max_latency_ms: Hard constraint on p50 latency (optional).
         max_memory_mb: Hard constraint on peak memory (optional).
         min_throughput_rps: Hard constraint on minimum throughput (optional).
+        max_quality_loss: Hard constraint on cosine-similarity drop vs FP32 (0.0–1.0).
+            Results where accuracy was not measured are kept (conservative).
     """
     frontier = build_pareto_frontier(results)
     passing = [r for r in results if r.ok]
@@ -43,6 +46,12 @@ def recommend(
             pool = [r for r in pool if r.memory_mb <= max_memory_mb]
         if min_throughput_rps is not None:
             pool = [r for r in pool if r.throughput_rps >= min_throughput_rps]
+        if max_quality_loss is not None:
+            # Keep results where accuracy wasn't measured (no precision reduction applied)
+            pool = [
+                r for r in pool
+                if r.accuracy_drop is None or r.accuracy_drop <= max_quality_loss
+            ]
         return pool
 
     # Apply constraints to Pareto frontier first, then widen to all passing results,
@@ -63,7 +72,7 @@ def recommend(
         )
     best = ranked[0]
 
-    rationale = _build_rationale(best, objective, max_latency_ms, max_memory_mb, min_throughput_rps)
+    rationale = _build_rationale(best, objective, max_latency_ms, max_memory_mb, min_throughput_rps, max_quality_loss)
 
     return Recommendation(
         result=best,
@@ -79,6 +88,7 @@ def _build_rationale(
     max_latency_ms: float | None,
     max_memory_mb: float | None,
     min_throughput_rps: float | None,
+    max_quality_loss: float | None = None,
 ) -> str:
     parts = [f"Best {objective} on the Pareto frontier: {result.candidate.description}."]
 
@@ -89,6 +99,9 @@ def _build_rationale(
     elif objective == "memory":
         parts.append(f"Peak memory: {result.memory_mb:.1f} MB.")
 
+    if result.accuracy_drop is not None:
+        parts.append(f"Quality loss vs FP32: {result.accuracy_drop * 100:.2f}%.")
+
     constraints: list[str] = []
     if max_latency_ms is not None:
         constraints.append(f"latency ≤ {max_latency_ms} ms")
@@ -96,6 +109,8 @@ def _build_rationale(
         constraints.append(f"memory ≤ {max_memory_mb} MB")
     if min_throughput_rps is not None:
         constraints.append(f"throughput ≥ {min_throughput_rps} req/s")
+    if max_quality_loss is not None:
+        constraints.append(f"quality loss ≤ {max_quality_loss * 100:.1f}%")
 
     if constraints:
         parts.append("Satisfies constraints: " + ", ".join(constraints) + ".")

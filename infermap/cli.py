@@ -43,11 +43,11 @@ _RANK_STYLES = ["bold green", "green", "yellow", "dim yellow", "dim", "dim", "di
 
 @app.command()
 def analyze(
-    model_path: Path = typer.Argument(..., help="Path to a saved PyTorch model (.pt / .pkl)"),
+    model_path: Path = typer.Argument(..., help="Path to a saved model (.pt / .pkl / ...)"),
 ) -> None:
     """Inspect a model and profile the current hardware."""
-    from infermap.inspector import inspect_model
     from infermap.profiler import profile_hardware
+    from infermap.registry import get_plugin
 
     _print_header("analyze")
 
@@ -55,7 +55,8 @@ def analyze(
         hw = profile_hardware()
 
     with console.status("[bold green]Inspecting model..."):
-        info = inspect_model(model_path)
+        plugin = get_plugin(model_path)
+        info = plugin.inspect(model_path)
 
     _print_hardware(hw)
     _print_model_info(info)
@@ -75,9 +76,9 @@ def preflight(
     ),
 ) -> None:
     """Run a fast feasibility check before benchmarking."""
-    from infermap.inspector import inspect_model
     from infermap.profiler import profile_hardware
     from infermap.preflight import run_preflight
+    from infermap.registry import get_plugin
 
     _print_header("preflight")
 
@@ -85,7 +86,8 @@ def preflight(
         hw = profile_hardware()
 
     with console.status("[bold green]Inspecting model..."):
-        info = inspect_model(model_path)
+        plugin = get_plugin(model_path)
+        info = plugin.inspect(model_path)
 
     result = run_preflight(info, hw, dtype=dtype, target_throughput=target_throughput)
     _print_preflight(result)
@@ -111,15 +113,18 @@ def benchmark(
     timeout: float = typer.Option(180.0, "--timeout", help="Per-candidate timeout in seconds (0 = no limit)"),
     calibration_data: Optional[Path] = typer.Option(
         None, "--calibration-data",
-        help="Path to a .pt file with calibration inputs for INT8 accuracy measurement",
+        help="Path to a .pt file (or image directory) with calibration inputs for accuracy measurement",
+    ),
+    max_quality_loss: Optional[float] = typer.Option(
+        None, "--max-quality-loss",
+        help="Maximum acceptable quality loss vs FP32 baseline (0.0–1.0). Requires --calibration-data.",
     ),
     format_: str = typer.Option("table", "--format", help="Output format: table | json"),
 ) -> None:
     """Benchmark all candidate deployment strategies."""
-    from infermap.inspector import inspect_model
     from infermap.profiler import profile_hardware
     from infermap.preflight import run_preflight
-    from infermap.candidates import generate_candidates
+    from infermap.registry import get_plugin
 
     shape = [int(x) for x in input_shape.split(",")]
     bs_list = [int(x) for x in batch_sizes.split(",")]
@@ -129,10 +134,16 @@ def benchmark(
     if not json_mode:
         _print_header("benchmark")
 
+    if max_quality_loss is not None and calibration_data is None:
+        err_console.print(
+            "[yellow]Warning: --max-quality-loss has no effect without --calibration-data.[/yellow]"
+        )
+
     with console.status("[bold green]Profiling hardware..."):
         hw = profile_hardware()
     with console.status("[bold green]Inspecting model..."):
-        info = inspect_model(model_path, input_shape=shape)
+        plugin = get_plugin(model_path)
+        info = plugin.inspect(model_path, input_shape=shape)
 
     pf = run_preflight(info, hw)
     if not json_mode:
@@ -144,13 +155,11 @@ def benchmark(
     if pf.category == "unlikely" and not json_mode:
         _prompt_unlikely_or_abort()  # no constraints to relax in bare benchmark
 
-    from infermap.inspector import _load_model
-    model = _load_model(model_path)
-    model.eval()
-
+    model = plugin.load(model_path)
     calib = _load_calibration(calibration_data, shape)
-    candidates = generate_candidates(info, hw)
-    results = _run_candidates(candidates, model, info, shape, bs_list, warmup, iters, timeout_s, calib, json_mode=json_mode)
+    candidates = plugin.generate_candidates(info, hw)
+    candidates, cost_estimates = _prune_with_cost_model(candidates, info, hw, bs_list[0], json_mode)
+    results = _run_candidates(plugin, candidates, model, info, shape, bs_list, warmup, iters, timeout_s, calib, json_mode=json_mode)
     if json_mode:
         _emit_json(results)
     else:
@@ -174,16 +183,19 @@ def optimize(
     timeout: float = typer.Option(180.0, "--timeout", help="Per-candidate timeout in seconds (0 = no limit)"),
     calibration_data: Optional[Path] = typer.Option(
         None, "--calibration-data",
-        help="Path to a .pt file with calibration inputs for INT8 accuracy measurement",
+        help="Path to a .pt file (or image directory) with calibration inputs for accuracy measurement",
+    ),
+    max_quality_loss: Optional[float] = typer.Option(
+        None, "--max-quality-loss",
+        help="Maximum acceptable quality loss vs FP32 baseline (0.0–1.0). Requires --calibration-data.",
     ),
     format_: str = typer.Option("table", "--format", help="Output format: table | json"),
 ) -> None:
     """Benchmark all candidates and recommend the optimal deployment strategy."""
-    from infermap.inspector import inspect_model
     from infermap.profiler import profile_hardware
     from infermap.preflight import run_preflight
-    from infermap.candidates import generate_candidates
     from infermap.recommender import recommend
+    from infermap.registry import get_plugin
 
     shape = [int(x) for x in input_shape.split(",")]
     bs_list = [int(x) for x in batch_sizes.split(",")]
@@ -193,10 +205,16 @@ def optimize(
     if not json_mode:
         _print_header("optimize")
 
+    if max_quality_loss is not None and calibration_data is None:
+        err_console.print(
+            "[yellow]Warning: --max-quality-loss has no effect without --calibration-data.[/yellow]"
+        )
+
     with console.status("[bold green]Profiling hardware..."):
         hw = profile_hardware()
     with console.status("[bold green]Inspecting model..."):
-        info = inspect_model(model_path, input_shape=shape)
+        plugin = get_plugin(model_path)
+        info = plugin.inspect(model_path, input_shape=shape)
 
     pf = run_preflight(info, hw, target_throughput=min_throughput_rps)
     if not json_mode:
@@ -209,13 +227,11 @@ def optimize(
         if _prompt_unlikely_or_abort():
             min_throughput_rps = None
 
-    from infermap.inspector import _load_model
-    model = _load_model(model_path)
-    model.eval()
-
+    model = plugin.load(model_path)
     calib = _load_calibration(calibration_data, shape)
-    candidates = generate_candidates(info, hw)
-    results = _run_candidates(candidates, model, info, shape, bs_list, 10, 100, timeout_s, calib, json_mode=json_mode)
+    candidates = plugin.generate_candidates(info, hw)
+    candidates, cost_estimates = _prune_with_cost_model(candidates, info, hw, bs_list[0], json_mode)
+    results = _run_candidates(plugin, candidates, model, info, shape, bs_list, 10, 100, timeout_s, calib, json_mode=json_mode)
 
     rec = recommend(
         results,
@@ -223,6 +239,7 @@ def optimize(
         max_latency_ms=max_latency_ms,
         max_memory_mb=max_memory_mb,
         min_throughput_rps=min_throughput_rps,
+        max_quality_loss=max_quality_loss,
     )
     if json_mode:
         _emit_json(results, rec)
@@ -291,7 +308,32 @@ def _load_calibration_dir(path: Path, input_shape: list[int]) -> list | None:
     return tensors
 
 
+def _prune_with_cost_model(
+    candidates: list,
+    info: object,
+    hw: object,
+    batch_size: int,
+    json_mode: bool,
+) -> tuple[list, list]:
+    from infermap.cost_model import prune_candidates
+    from infermap.inspector import ModelInfo
+    from infermap.profiler import HardwareProfile
+
+    assert isinstance(info, ModelInfo)
+    assert isinstance(hw, HardwareProfile)
+
+    kept, estimates = prune_candidates(candidates, info, hw, batch_size=batch_size)
+    pruned = len(candidates) - len(kept)
+    if pruned > 0 and not json_mode:
+        console.print(
+            f"  [dim]cost model pruned {pruned} candidate(s) predicted "
+            f">10× slower than the best estimate[/dim]\n"
+        )
+    return kept, estimates
+
+
 def _run_candidates(
+    plugin: object,
     candidates: list,
     model: object,
     model_info: object,
@@ -303,7 +345,8 @@ def _run_candidates(
     calibration_inputs: list | None = None,
     json_mode: bool = False,
 ) -> list:
-    from infermap.benchmark import benchmark_candidate
+    from infermap.plugin import ModelPlugin
+    assert isinstance(plugin, ModelPlugin)
 
     results = []
     total = len(candidates) * len(batch_sizes)
@@ -311,9 +354,9 @@ def _run_candidates(
     if json_mode:
         for cand in candidates:
             for bs in batch_sizes:
-                r = benchmark_candidate(  # type: ignore[arg-type]
+                r = plugin.benchmark(  # type: ignore[arg-type]
                     cand, model, model_info, shape, bs, warmup, iters,
-                    timeout_s=timeout_s, calibration_inputs=calibration_inputs,
+                    timeout_s, calibration_inputs,
                 )
                 results.append(r)
         return results
@@ -336,9 +379,9 @@ def _run_candidates(
         for cand in candidates:
             for bs in batch_sizes:
                 progress.update(task, description=f"{cand.description}  bs={bs}")
-                r = benchmark_candidate(  # type: ignore[arg-type]
+                r = plugin.benchmark(  # type: ignore[arg-type]
                     cand, model, model_info, shape, bs, warmup, iters,
-                    timeout_s=timeout_s, calibration_inputs=calibration_inputs,
+                    timeout_s, calibration_inputs,
                 )
                 results.append(r)
                 if r.ok:
@@ -437,6 +480,12 @@ def _print_hardware(hw: object) -> None:
         t.add_row("device", hw.accelerator.name)
         t.add_row("vram", f"{hw.accelerator.memory_gb:.1f} GB")
         t.add_row("bf16", "yes" if hw.accelerator.bf16 else "no")
+        if hw.accelerator.memory_bandwidth_gbps is not None:
+            t.add_row("mem bandwidth", f"{hw.accelerator.memory_bandwidth_gbps:.0f} GB/s")
+        if hw.accelerator.fp16_tflops is not None:
+            t.add_row("fp16 tflops", f"{hw.accelerator.fp16_tflops:.1f}")
+        if hw.accelerator.int8_tops is not None and hw.accelerator.int8_tops > 0:
+            t.add_row("int8 tops", f"{hw.accelerator.int8_tops:.0f}")
     console.print(Rule("[dim]hardware[/dim]", style="dim"))
     console.print(t)
 
@@ -453,6 +502,25 @@ def _print_model_info(info: object) -> None:
     t.add_row("parameters", f"{info.parameters:,}")
     t.add_row("memory fp32", f"{info.estimated_memory_fp32_gb:.2f} GB")
     t.add_row("memory fp16", f"{info.estimated_memory_fp16_gb:.2f} GB")
+    # Architecture fingerprint (V2)
+    if info.num_layers is not None:
+        t.add_row("layers", str(info.num_layers))
+    if info.num_attention_heads is not None:
+        t.add_row("attn heads", str(info.num_attention_heads))
+    if info.hidden_size is not None:
+        t.add_row("hidden size", str(info.hidden_size))
+    if info.vocab_size is not None:
+        t.add_row("vocab size", f"{info.vocab_size:,}")
+    if info.max_sequence_length is not None:
+        t.add_row("max seq len", str(info.max_sequence_length))
+    if info.num_conv_layers is not None:
+        t.add_row("conv layers", str(info.num_conv_layers))
+    if info.num_trees is not None:
+        t.add_row("trees", str(info.num_trees))
+    if info.max_depth is not None:
+        t.add_row("max depth", str(info.max_depth))
+    if info.num_features is not None:
+        t.add_row("features", str(info.num_features))
     console.print(Rule("[dim]model[/dim]", style="dim"))
     console.print(t)
 

@@ -80,3 +80,59 @@ def test_candidate_id_equals_backend() -> None:
     candidates = generate_candidates(_make_model(), _make_hw(kind="none"))
     for cand in candidates:
         assert cand.id == cand.backend
+
+
+# ── TensorRT candidates ───────────────────────────────────────────────────────
+
+def test_cuda_candidates_include_tensorrt_backends() -> None:
+    candidates = generate_candidates(_make_model(), _make_hw(kind="cuda", memory_gb=24.0))
+    backends = [c.backend for c in candidates]
+    assert "tensorrt_fp32" in backends
+    assert "tensorrt_fp16" in backends
+    assert "tensorrt_int8" in backends
+
+
+def test_tensorrt_candidates_require_export() -> None:
+    candidates = generate_candidates(_make_model(), _make_hw(kind="cuda", memory_gb=24.0))
+    for c in candidates:
+        if "tensorrt" in c.backend:
+            assert c.requires_export, f"{c.backend} should require_export=True"
+
+
+def test_tensorrt_candidates_use_cuda_device() -> None:
+    candidates = generate_candidates(_make_model(), _make_hw(kind="cuda", memory_gb=24.0))
+    for c in candidates:
+        if "tensorrt" in c.backend:
+            assert c.device == "cuda", f"{c.backend} should target cuda"
+
+
+# ── OpenVINO candidates ───────────────────────────────────────────────────────
+
+def test_cpu_candidates_include_openvino_fp32_and_int8() -> None:
+    candidates = generate_candidates(_make_model(), _make_hw(kind="none"))
+    backends = [c.backend for c in candidates]
+    assert "openvino_fp32" in backends
+    assert "openvino_int8" in backends
+
+
+def test_mps_candidates_include_openvino_fp32_but_not_int8() -> None:
+    candidates = generate_candidates(_make_model(), _make_hw(kind="mps"))
+    backends = [c.backend for c in candidates]
+    assert "openvino_fp32" in backends
+    assert "openvino_int8" not in backends
+
+
+def test_openvino_candidates_require_export() -> None:
+    for kind in ("none", "mps"):
+        candidates = generate_candidates(_make_model(), _make_hw(kind=kind))
+        for c in candidates:
+            if "openvino" in c.backend:
+                assert c.requires_export, f"{c.backend} should require_export=True"
+
+
+def test_openvino_candidates_use_cpu_device() -> None:
+    for kind in ("none", "mps"):
+        candidates = generate_candidates(_make_model(), _make_hw(kind=kind))
+        for c in candidates:
+            if "openvino" in c.backend:
+                assert c.device == "cpu", f"{c.backend} should target cpu"

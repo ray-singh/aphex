@@ -3,9 +3,7 @@
   <img src="docs/logo/lockup-dark.svg#gh-dark-mode-only" alt="aphex" height="120"/>
 </p>
 
-A hardware-aware ML optimization and recommendation framework.
-
-aphex profiles your hardware, inspects your PyTorch model, benchmarks every viable deployment strategy, and recommends the fastest option that fits your constraints -- all from a single CLI command.
+A hardware-aware deployment planner that profiles arbitrary PyTorch models, builds a cost model, searches the deployment space, and produces a recommended serving configuration with predicted latency/throughput tradeoffs - all in one command.
 
 ## Features
 

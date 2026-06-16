@@ -5,10 +5,10 @@ from __future__ import annotations
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
-ModelFamily = Literal["transformer", "cnn", "unknown"]
-Framework = Literal["pytorch", "unknown"]
+ModelFamily = str  # e.g. "transformer", "cnn", "tree_ensemble", "unknown"
+Framework = str   # e.g. "pytorch", "sklearn", "xgboost", "unknown"
 
 # (module_name, class_name, is_nn_module) for every stub class created by _StubPickle.
 # Workers that need to unpickle stub models read this to recreate the same classes.
@@ -33,6 +33,16 @@ class ModelInfo:
     estimated_memory_fp16_gb: float
     input_shape: list[int] | None = None
     model_path: str | None = None
+    # Architecture fingerprint (V2) — populated by framework-specific inspectors
+    num_layers: int | None = None
+    num_attention_heads: int | None = None
+    hidden_size: int | None = None
+    vocab_size: int | None = None
+    max_sequence_length: int | None = None
+    num_conv_layers: int | None = None
+    num_features: int | None = None  # sklearn: n_features_in_
+    num_trees: int | None = None     # tree ensembles
+    max_depth: int | None = None     # tree ensembles
 
     def estimated_memory_gb(self, dtype: str = "fp32") -> float:
         bpp = BYTES_PER_PARAM.get(dtype, 4.0)
@@ -61,6 +71,7 @@ def inspect_model(model_or_path: Any, input_shape: list[int] | None = None) -> M
     params = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     family = _detect_family(model)
+    fp = _extract_pytorch_fingerprint(model)
 
     mem_fp32 = (params * 4.0 * 1.2) / 1e9
     mem_fp16 = (params * 2.0 * 1.2) / 1e9
@@ -78,7 +89,38 @@ def inspect_model(model_or_path: Any, input_shape: list[int] | None = None) -> M
         estimated_memory_fp16_gb=mem_fp16,
         input_shape=input_shape,
         model_path=path_str,
+        num_layers=fp.get("num_layers"),
+        num_attention_heads=fp.get("num_attention_heads"),
+        hidden_size=fp.get("hidden_size"),
+        vocab_size=fp.get("vocab_size"),
+        num_conv_layers=fp.get("num_conv_layers"),
     )
+
+
+def _extract_pytorch_fingerprint(model: Any) -> dict[str, Any]:
+    """Extract architecture fingerprint fields from a PyTorch nn.Module."""
+    import torch.nn as nn
+
+    result: dict[str, Any] = {}
+
+    attn_mods = [m for m in model.modules() if isinstance(m, nn.MultiheadAttention)]
+    if attn_mods:
+        result["num_layers"] = len(attn_mods)
+        result["num_attention_heads"] = attn_mods[0].num_heads
+        result["hidden_size"] = attn_mods[0].embed_dim
+
+    emb_mods = [m for m in model.modules() if isinstance(m, nn.Embedding)]
+    if emb_mods:
+        result["vocab_size"] = max(e.num_embeddings for e in emb_mods)
+
+    n_conv = sum(
+        1 for m in model.modules()
+        if isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Conv3d))
+    )
+    if n_conv:
+        result["num_conv_layers"] = n_conv
+
+    return result
 
 
 def _load_model(path: Path) -> Any:
@@ -186,20 +228,35 @@ class _StubPickle:
                 return cls
 
 
+_RESIDUAL_SUBMODULE_NAMES = frozenset({"downsample", "shortcut", "residual", "skip"})
+
+
 def _patch_stub_forwards(model: Any) -> None:
     """Inject best-effort forward() into stub nn.Modules that have none.
 
-    Stub classes created by _StubPickle.Unpickler lack a forward() definition,
-    which makes the model uncallable.  This function walks the module tree and
-    injects concrete forward implementations based on the submodule names that
-    are present after pickle restoration.
+    Stub classes created by _StubPickle.Unpickler preserve weights and submodule
+    structure but lose the Python forward() code.  This function reconstructs a
+    best-effort forward using two tiers:
 
-    Forwards are attached to the CLASS (not the instance) so that torch.compile /
-    Dynamo, deepcopy, and quantize_dynamic all behave correctly — these tools
-    expect forward to be a class-level method, not an instance attribute.
+    Tier 1 — leaf stubs (no child modules): infer layer type from parameter shapes.
+      weight 2D → Linear  |  3D → Conv1d  |  4D → Conv2d
+      1D weight + running_mean buffer → BatchNorm  |  1D weight only → LayerNorm
+      no weight → identity (dropout, activation stubs, etc.)
+
+    Tier 2 — container stubs (has child modules):
+      has downsample/shortcut/skip/residual child → residual(input) + sequential(rest)
+      otherwise → sequential: call each child in _modules order
+
+    Architecture-specific overrides run first for patterns where generic inference
+    would produce wrong results (e.g. causal conv length clipping, dual-head routing,
+    CLS token insertion).  The generic tiers handle everything else.
+
+    Forwards are attached to the CLASS (not the instance) so that torch.compile,
+    deepcopy, and quantize_dynamic all work correctly.
     """
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
 
     def _is_stub(m: nn.Module) -> bool:
         return "forward" not in type(m).__dict__
@@ -208,12 +265,18 @@ def _patch_stub_forwards(model: Any) -> None:
         if not _is_stub(module):
             continue
 
-        sub = set(module._modules)
+        sub = module._modules
+        sub_keys = set(sub.keys())
+        own_params = {n: p for n, p in module.named_parameters(recurse=False)}
+        own_buffers = {n: b for n, b in module.named_buffers(recurse=False)}
 
-        # TCN-style residual block: conv1, conv2, relu (drop/downsample optional).
-        # Causal TCNs pad both sides but only use the causal (left-padded) portion,
-        # so we clip each conv output back to the original sequence length.
-        if {"conv1", "conv2", "relu"}.issubset(sub):
+        # ── Architecture-specific overrides ───────────────────────────────────
+        # These run first because they handle routing that generic inference
+        # can't reconstruct (causal clipping, dual heads, CLS tokens, etc.).
+
+        # Causal TCN residual block: conv outputs are over-padded; clip to input
+        # length before the residual add, or shapes will mismatch.
+        if {"conv1", "conv2", "relu"}.issubset(sub_keys):
             def _tcn_block_fwd(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
                 residual = x
                 L = x.shape[2]
@@ -228,20 +291,19 @@ def _patch_stub_forwards(model: Any) -> None:
                 if "downsample" in self._modules:
                     residual = self.downsample(x)
                 return self.relu(out + residual)
-
             type(module).forward = _tcn_block_fwd
+            continue
 
-        # TCN/CNN trunk with dual prediction heads
-        elif "network" in sub and "rv_head_linear" in sub and "shock_head" in sub:
+        # Sequential trunk → last-timestep slice → two parallel heads.
+        if "network" in sub_keys and "rv_head_linear" in sub_keys and "shock_head" in sub_keys:
             def _tcn_net_fwd(self: nn.Module, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-                out = self.network(x)
-                out = out[:, :, -1]  # last time-step
+                out = self.network(x)[:, :, -1]
                 return self.rv_head_linear(out), self.shock_head(out)
-
             type(module).forward = _tcn_net_fwd
+            continue
 
-        # Transformer trunk with CLS token and dual prediction heads
-        elif "input_proj" in sub and "encoder" in sub and "rv_head_linear" in sub:
+        # Transformer trunk: CLS token + positional embedding + encoder + dual heads.
+        if "input_proj" in sub_keys and "encoder" in sub_keys and "rv_head_linear" in sub_keys:
             def _transformer_net_fwd(
                 self: nn.Module, x: torch.Tensor
             ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -249,17 +311,96 @@ def _patch_stub_forwards(model: Any) -> None:
                 b = x.shape[0]
                 cls = self.cls_token.expand(b, -1, -1)
                 x = torch.cat([cls, x], dim=1)
-                # Access the embedding weight table directly rather than calling
-                # pos_emb(arange(n)): avoids a dynamic torch.arange op that bakes
-                # the current device into the trace, breaking MPS/CoreML export.
-                # pos_emb.weight[:n] is mathematically identical and lives on the
-                # model's device, so it traces cleanly across devices.
                 x = x + self.pos_emb.weight[:x.shape[1]].unsqueeze(0)
                 x = self.encoder(x)
                 out = x[:, 0]
                 return self.rv_head_linear(out), self.shock_head(out)
-
             type(module).forward = _transformer_net_fwd
+            continue
+
+        # ── Tier 1: leaf stubs (no child modules) ─────────────────────────────
+        if not sub:
+            w = own_params.get("weight")
+            if w is None:
+                def _identity_fwd(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
+                    return x
+                type(module).forward = _identity_fwd
+
+            elif w.dim() == 1:
+                if "running_mean" in own_buffers:
+                    def _bn_fwd(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
+                        return F.batch_norm(
+                            x, self.running_mean, self.running_var,
+                            self.weight, self._parameters.get("bias"),
+                            False, 0.1, 1e-5,
+                        )
+                    type(module).forward = _bn_fwd
+                else:
+                    def _ln_fwd(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
+                        return F.layer_norm(
+                            x, self.weight.shape,
+                            self.weight, self._parameters.get("bias"),
+                        )
+                    type(module).forward = _ln_fwd
+
+            elif w.dim() == 2:
+                def _linear_fwd(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
+                    return F.linear(x, self.weight, self._parameters.get("bias"))
+                type(module).forward = _linear_fwd
+
+            elif w.dim() == 3:
+                def _conv1d_fwd(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
+                    return F.conv1d(
+                        x, self.weight, self._parameters.get("bias"),
+                        getattr(self, "stride", (1,)),
+                        getattr(self, "padding", (0,)),
+                        getattr(self, "dilation", (1,)),
+                        getattr(self, "groups", 1),
+                    )
+                type(module).forward = _conv1d_fwd
+
+            elif w.dim() == 4:
+                def _conv2d_fwd(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
+                    return F.conv2d(
+                        x, self.weight, self._parameters.get("bias"),
+                        getattr(self, "stride", (1, 1)),
+                        getattr(self, "padding", (0, 0)),
+                        getattr(self, "dilation", (1, 1)),
+                        getattr(self, "groups", 1),
+                    )
+                type(module).forward = _conv2d_fwd
+
+            else:
+                def _identity_fwd(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
+                    return x
+                type(module).forward = _identity_fwd
+
+            continue
+
+        # ── Tier 2: container stubs (has child modules) ───────────────────────
+        residual_keys = _RESIDUAL_SUBMODULE_NAMES & sub_keys
+        if residual_keys:
+            rk = next(iter(residual_keys))
+
+            def _residual_fwd(self: nn.Module, x: torch.Tensor, _rk: str = rk) -> torch.Tensor:
+                branch = getattr(self, _rk)
+                residual = branch(x) if branch is not None else x
+                out = x
+                for name, child in self._modules.items():
+                    if name == _rk:
+                        continue
+                    out = child(out)
+                return out + residual
+
+            type(module).forward = _residual_fwd
+
+        else:
+            def _sequential_fwd(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
+                for child in self._modules.values():
+                    x = child(x)
+                return x
+
+            type(module).forward = _sequential_fwd
 
 
 # Layer-name heuristics for family detection

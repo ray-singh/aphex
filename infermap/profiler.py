@@ -24,6 +24,10 @@ class AcceleratorProfile:
     bf16: bool
     # CUDA-only fields
     cuda_compute: str = ""
+    # Hardware capability fingerprint (V3) — None when unknown
+    memory_bandwidth_gbps: float | None = None
+    fp16_tflops: float | None = None
+    int8_tops: float | None = None
     # MPS-only: memory is shared with CPU RAM
 
 
@@ -44,6 +48,72 @@ class HardwareProfile:
             return self.accelerator.memory_gb
         # MPS and CPU-only: use RAM, reserving ~4 GB for system
         return max(0.0, self.cpu.ram_gb - 4.0)
+
+
+# GPU specs ordered longest-match-first so "a100" doesn't swallow "a10".
+# Values from NVIDIA product pages (fp16 Tensor Core peak, HBM bandwidth).
+_GPU_SPECS: list[tuple[str, float, float, float]] = [
+    # (name_substr, memory_bandwidth_gbps, fp16_tflops, int8_tops)
+    ("h200",    4800.0, 1979.0, 3958.0),
+    ("h100",    3350.0,  989.0, 1979.0),
+    ("b200",    8000.0, 4500.0, 9000.0),
+    ("a100",    2039.0,  312.0,  624.0),
+    ("a30",      933.0,  165.0,  330.0),
+    ("a10g",     600.0,  125.0,  250.0),
+    ("a10",      600.0,  125.0,  250.0),
+    ("l40s",     864.0,  362.0,  724.0),
+    ("l40",      864.0,  181.0,  362.0),
+    ("l4",       300.0,  121.0,  242.0),
+    ("v100",     900.0,  112.0,    0.0),
+    ("t4",       320.0,   65.0,  130.0),
+    ("p100",     720.0,   18.7,    0.0),
+    ("rtx 4090", 1008.0, 330.0,  660.0),
+    ("rtx 4080",  717.0, 245.0,  490.0),
+    ("rtx 3090",  936.0, 142.0,  284.0),
+    ("rtx 3080",  760.0, 119.0,  238.0),
+    ("rtx 3070",  448.0,  82.0,  164.0),
+    ("4090",     1008.0, 330.0,  660.0),
+    ("4080",      717.0, 245.0,  490.0),
+    ("3090",      936.0, 142.0,  284.0),
+    ("3080",      760.0, 119.0,  238.0),
+    ("3070",      448.0,  82.0,  164.0),
+]
+
+# Apple Silicon — longer variant names must precede shorter ones (m4 max before m4).
+# Values from Apple product pages (GPU bandwidth, Neural Engine excluded from fp16_tflops).
+_APPLE_SPECS: list[tuple[str, float, float]] = [
+    # (name_substr, memory_bandwidth_gbps, fp16_tflops)
+    ("m4 max",    546.0, 18.4),
+    ("m4 pro",    273.0,  9.2),
+    ("m4",        120.0,  4.6),
+    ("m3 max",    300.0, 14.2),
+    ("m3 pro",    150.0,  7.4),
+    ("m3",        100.0,  3.6),
+    ("m2 ultra",  800.0, 27.2),
+    ("m2 max",    400.0, 13.6),
+    ("m2 pro",    200.0,  6.8),
+    ("m2",        100.0,  3.6),
+    ("m1 ultra",  800.0, 20.8),
+    ("m1 max",    400.0, 10.4),
+    ("m1 pro",    200.0,  5.2),
+    ("m1",         68.3,  2.6),
+]
+
+
+def _lookup_gpu_specs(name: str) -> tuple[float | None, float | None, float | None]:
+    lower = name.lower()
+    for substr, bw, fp16, int8 in _GPU_SPECS:
+        if substr in lower:
+            return bw, fp16, int8
+    return None, None, None
+
+
+def _lookup_apple_specs(name: str) -> tuple[float | None, float | None]:
+    lower = name.lower()
+    for substr, bw, fp16 in _APPLE_SPECS:
+        if substr in lower:
+            return bw, fp16
+    return None, None
 
 
 def profile_hardware() -> HardwareProfile:
@@ -101,12 +171,16 @@ def _profile_cuda(torch: object) -> AcceleratorProfile:
     memory_gb = props.total_memory / 1e9
     bf16 = props.major >= 8  # Ampere (sm_80) and above support BF16
     compute = f"{props.major}.{props.minor}"
+    bw, fp16, int8 = _lookup_gpu_specs(name)
     return AcceleratorProfile(
         kind="cuda",
         name=name,
         memory_gb=memory_gb,
         bf16=bf16,
         cuda_compute=compute,
+        memory_bandwidth_gbps=bw,
+        fp16_tflops=fp16,
+        int8_tops=int8,
     )
 
 
@@ -117,11 +191,14 @@ def _profile_mps() -> AcceleratorProfile:
     ram_gb = psutil.virtual_memory().total / 1e9
     # M1 Pro and earlier do not support BF16; M2+ does
     bf16 = _apple_supports_bf16(chip)
+    bw, fp16 = _lookup_apple_specs(chip)
     return AcceleratorProfile(
         kind="mps",
         name=chip,
         memory_gb=ram_gb,  # unified memory
         bf16=bf16,
+        memory_bandwidth_gbps=bw,
+        fp16_tflops=fp16,
     )
 
 

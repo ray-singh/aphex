@@ -3,23 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 from infermap.inspector import ModelInfo
 from infermap.profiler import HardwareProfile
 
-Backend = Literal[
-    "pytorch_fp32",
-    "pytorch_fp16",
-    "pytorch_bf16",
-    "torch_compile_fp32",
-    "torch_compile_fp16",
-    "onnx_cpu",
-    "onnx_cuda",
-    "onnx_coreml",
-    "pytorch_int8_dynamic",
-    "onnx_int8_cpu",
-]
+Backend = str  # e.g. "pytorch_fp32", "sklearn_predict", "treelite_cpu", ...
 
 
 @dataclass
@@ -100,6 +88,27 @@ def _cuda_candidates(hardware: HardwareProfile) -> list[DeploymentCandidate]:
 
     candidates += [
         DeploymentCandidate(
+            backend="tensorrt_fp32",
+            dtype="fp32",
+            description="TensorRT FP32 (CUDA)",
+            requires_export=True,
+            device="cuda",
+        ),
+        DeploymentCandidate(
+            backend="tensorrt_fp16",
+            dtype="fp16",
+            description="TensorRT FP16 (CUDA)",
+            requires_export=True,
+            device="cuda",
+        ),
+        DeploymentCandidate(
+            backend="tensorrt_int8",
+            dtype="int8",
+            description="TensorRT INT8 (CUDA, requires --calibration-data)",
+            requires_export=True,
+            device="cuda",
+        ),
+        DeploymentCandidate(
             backend="pytorch_int8_dynamic",
             dtype="int8",
             description="PyTorch INT8 dynamic (CPU)",
@@ -169,6 +178,13 @@ def _mps_candidates(hardware: HardwareProfile) -> list[DeploymentCandidate]:
             requires_export=True,
             device="cpu",
         ),
+        DeploymentCandidate(
+            backend="openvino_fp32",
+            dtype="fp32",
+            description="OpenVINO FP32 (CPU)",
+            requires_export=True,
+            device="cpu",
+        ),
     ]
     return candidates
 
@@ -207,6 +223,20 @@ def _cpu_candidates() -> list[DeploymentCandidate]:
             backend="onnx_int8_cpu",
             dtype="int8",
             description="ONNX Runtime INT8 (CPU)",
+            requires_export=True,
+            device="cpu",
+        ),
+        DeploymentCandidate(
+            backend="openvino_fp32",
+            dtype="fp32",
+            description="OpenVINO FP32 (CPU)",
+            requires_export=True,
+            device="cpu",
+        ),
+        DeploymentCandidate(
+            backend="openvino_int8",
+            dtype="int8",
+            description="OpenVINO INT8 (CPU, requires nncf)",
             requires_export=True,
             device="cpu",
         ),
