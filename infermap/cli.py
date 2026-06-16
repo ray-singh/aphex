@@ -192,6 +192,10 @@ def optimize(
         Path("deployment.yaml"), "--output",
         help="Write deployment config to this path (default: deployment.yaml). Pass '' to skip.",
     ),
+    serving: Optional[str] = typer.Option(
+        None, "--serving",
+        help="Generate serving configs: triton, torchserve, bentoml, fastapi",
+    ),
     format_: str = typer.Option("table", "--format", help="Output format: table | json"),
 ) -> None:
     """Benchmark all candidates and recommend the optimal deployment strategy."""
@@ -245,7 +249,10 @@ def optimize(
         max_quality_loss=max_quality_loss,
     )
 
-    if output and str(output) != "":
+    write_output = bool(output and str(output) != "")
+    serving_dir: Path | None = None
+
+    if write_output or serving:
         from infermap.deployment import build_config, write_yaml
         from infermap.system_recommender import recommend_system_config
         sys_cfg = recommend_system_config(rec, info, hw, objective=objective)
@@ -258,15 +265,32 @@ def optimize(
             max_quality_loss=max_quality_loss,
             system=sys_cfg,
         )
-        write_yaml(cfg, output)
+        if write_output:
+            write_yaml(cfg, output)  # type: ignore[arg-type]
+
+        if serving:
+            from infermap.serving import generate_serving_config, SUPPORTED_FRAMEWORKS
+            if serving not in SUPPORTED_FRAMEWORKS:
+                err_console.print(
+                    f"Unknown serving framework {serving!r}. "
+                    f"Supported: {', '.join(SUPPORTED_FRAMEWORKS)}"
+                )
+                raise typer.Exit(code=1)
+            base = output.parent if (output and str(output) != "") else Path(".")
+            serving_dir = base / "serving" / serving
+            generate_serving_config(serving, cfg, serving_dir)
 
     if json_mode:
         _emit_json(results, rec)
     else:
         _print_results_table(results)
         _print_recommendation(rec)
-        if output and str(output) != "":
-            console.print(f"  [dim]deployment config written to[/dim] [bold]{output}[/bold]\n")
+        if write_output:
+            console.print(f"  [dim]deployment config →[/dim] [bold]{output}[/bold]")
+        if serving_dir is not None:
+            console.print(f"  [dim]serving config ({serving}) →[/dim] [bold]{serving_dir}[/bold]")
+        if write_output or serving_dir is not None:
+            console.print()
 
 
 # ---------------------------------------------------------------------------
