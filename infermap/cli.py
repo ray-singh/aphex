@@ -112,11 +112,24 @@ def benchmark(
     timeout: float = typer.Option(180.0, "--timeout", help="Per-candidate timeout in seconds (0 = no limit)"),
     calibration_data: Optional[Path] = typer.Option(
         None, "--calibration-data",
-        help="Path to a .pt file (or image directory) with calibration inputs for accuracy measurement",
+        help="Path to a .pt file (or image directory) with unlabelled calibration inputs for int8 quantization.",
+    ),
+    eval_data: Optional[Path] = typer.Option(
+        None, "--eval",
+        help="Path to labelled eval data (.pt, .parquet, .csv, or image dir) for real accuracy measurement.",
+    ),
+    eval_label_col: str = typer.Option(
+        "label", "--eval-label-col",
+        help="Column name for labels when --eval points to a .parquet or .csv file.",
+    ),
+    infer_fn: Optional[str] = typer.Option(
+        None, "--infer-fn",
+        help="Inference callable as 'path/to/module.py:function'. Required with --eval. "
+             "Function signature: predict(inputs: list) -> np.ndarray.",
     ),
     max_quality_loss: Optional[float] = typer.Option(
         None, "--max-quality-loss",
-        help="Maximum acceptable quality loss vs FP32 baseline (0.0–1.0). Requires --calibration-data.",
+        help="Maximum acceptable quality loss vs FP32 baseline (0.0–1.0). Requires --calibration-data or --eval.",
     ),
     format_: str = typer.Option("table", "--format", help="Output format: table | json"),
 ) -> None:
@@ -133,9 +146,9 @@ def benchmark(
     if not json_mode:
         _print_header("benchmark")
 
-    if max_quality_loss is not None and calibration_data is None:
+    if max_quality_loss is not None and calibration_data is None and eval_data is None:
         err_console.print(
-            "[yellow]Warning: --max-quality-loss has no effect without --calibration-data.[/yellow]"
+            "[yellow]Warning: --max-quality-loss has no effect without --calibration-data or --eval.[/yellow]"
         )
 
     with console.status("[bold green]Profiling hardware..."):
@@ -154,11 +167,17 @@ def benchmark(
     if pf.category == "unlikely" and not json_mode:
         _prompt_unlikely_or_abort()  # no constraints to relax in bare benchmark
 
+    if eval_data and not infer_fn:
+        err_console.print("[yellow]Warning: --eval has no effect without --infer-fn.[/yellow]")
+
     model = plugin.load(model_path)
-    calib = _load_calibration(calibration_data, shape)
+    eval_dataset = _load_eval(eval_data, info, eval_label_col)
+    fn = _load_infer_fn(infer_fn)
+    calib = _load_calibration(calibration_data, shape) or (eval_dataset.inputs if eval_dataset else None)
     candidates = plugin.generate_candidates(info, hw)
     candidates, cost_estimates = _prune_with_cost_model(candidates, info, hw, bs_list[0], json_mode)
     results = _run_candidates(plugin, candidates, model, info, shape, bs_list, warmup, iters, timeout_s, calib, json_mode=json_mode)
+    _run_eval(eval_dataset, fn, json_mode, results=results, model=model, info=info)
     if json_mode:
         _emit_json(results)
     else:
@@ -182,11 +201,24 @@ def optimize(
     timeout: float = typer.Option(180.0, "--timeout", help="Per-candidate timeout in seconds (0 = no limit)"),
     calibration_data: Optional[Path] = typer.Option(
         None, "--calibration-data",
-        help="Path to a .pt file (or image directory) with calibration inputs for accuracy measurement",
+        help="Path to a .pt file (or image directory) with unlabelled calibration inputs for int8 quantization.",
+    ),
+    eval_data: Optional[Path] = typer.Option(
+        None, "--eval",
+        help="Path to labelled eval data (.pt, .parquet, .csv, or image dir) for real accuracy measurement.",
+    ),
+    eval_label_col: str = typer.Option(
+        "label", "--eval-label-col",
+        help="Column name for labels when --eval points to a .parquet or .csv file.",
+    ),
+    infer_fn: Optional[str] = typer.Option(
+        None, "--infer-fn",
+        help="Inference callable as 'path/to/module.py:function'. Required with --eval. "
+             "Function signature: predict(inputs: list) -> np.ndarray.",
     ),
     max_quality_loss: Optional[float] = typer.Option(
         None, "--max-quality-loss",
-        help="Maximum acceptable quality loss vs FP32 baseline (0.0–1.0). Requires --calibration-data.",
+        help="Maximum acceptable quality loss vs FP32 baseline (0.0–1.0). Requires --calibration-data or --eval.",
     ),
     output: Optional[Path] = typer.Option(
         Path("deployment.yaml"), "--output",
@@ -212,9 +244,9 @@ def optimize(
     if not json_mode:
         _print_header("optimize")
 
-    if max_quality_loss is not None and calibration_data is None:
+    if max_quality_loss is not None and calibration_data is None and eval_data is None:
         err_console.print(
-            "[yellow]Warning: --max-quality-loss has no effect without --calibration-data.[/yellow]"
+            "[yellow]Warning: --max-quality-loss has no effect without --calibration-data or --eval.[/yellow]"
         )
 
     with console.status("[bold green]Profiling hardware..."):
@@ -234,11 +266,17 @@ def optimize(
         if _prompt_unlikely_or_abort():
             min_throughput_rps = None
 
+    if eval_data and not infer_fn:
+        err_console.print("[yellow]Warning: --eval has no effect without --infer-fn.[/yellow]")
+
     model = plugin.load(model_path)
-    calib = _load_calibration(calibration_data, shape)
+    eval_dataset = _load_eval(eval_data, info, eval_label_col)
+    fn = _load_infer_fn(infer_fn)
+    calib = _load_calibration(calibration_data, shape) or (eval_dataset.inputs if eval_dataset else None)
     candidates = plugin.generate_candidates(info, hw)
     candidates, cost_estimates = _prune_with_cost_model(candidates, info, hw, bs_list[0], json_mode)
     results = _run_candidates(plugin, candidates, model, info, shape, bs_list, 10, 100, timeout_s, calib, json_mode=json_mode)
+    eval_result = _run_eval(eval_dataset, fn, json_mode, results=results, model=model, info=info)
 
     rec = recommend(
         results,
@@ -264,6 +302,8 @@ def optimize(
             min_throughput_rps=min_throughput_rps,
             max_quality_loss=max_quality_loss,
             system=sys_cfg,
+            eval_metric=eval_result[0] if eval_result else None,
+            eval_score=eval_result[1] if eval_result else None,
         )
         if write_output:
             write_yaml(cfg, output)  # type: ignore[arg-type]
@@ -284,7 +324,7 @@ def optimize(
         _emit_json(results, rec)
     else:
         _print_results_table(results)
-        _print_recommendation(rec)
+        _print_recommendation(rec, eval_result)
         if write_output:
             console.print(f"  [dim]deployment config →[/dim] [bold]{output}[/bold]")
         if serving_dir is not None:
@@ -351,6 +391,74 @@ def _load_calibration_dir(path: Path, input_shape: list[int]) -> list | None:
         tensors.append(t.unsqueeze(0))                  # (1, C, H, W)
 
     return tensors
+
+
+def _load_eval(path: Optional[Path], info: object, label_col: str) -> object:
+    if path is None:
+        return None
+    from infermap.evaluator import load_eval_data
+    from infermap.inspector import ModelInfo
+    assert isinstance(info, ModelInfo)
+    try:
+        return load_eval_data(path, info, label_col=label_col)
+    except Exception as exc:
+        err_console.print(f"[yellow]Warning: could not load eval data: {exc}[/yellow]")
+        return None
+
+
+def _load_infer_fn(spec: Optional[str]) -> object:
+    if spec is None:
+        return None
+    from infermap.evaluator import load_infer_fn
+    return load_infer_fn(spec)
+
+
+def _run_eval(
+    eval_dataset: object,
+    infer_fn: object,
+    json_mode: bool,
+    results: list | None = None,
+    model: object | None = None,
+    info: object | None = None,
+) -> tuple[str, float] | None:
+    """Run accuracy evaluation.
+
+    Path 1 — infer_fn provided: calls evaluate_baseline, returns (metric, score).
+    Path 2 — no infer_fn but results+model+info provided: calls fill_accuracy_drop
+              to mutate BenchmarkResult.accuracy_drop in-place, returns None.
+    """
+    from infermap.evaluator import EvalDataset
+    if eval_dataset is None:
+        return None
+    assert isinstance(eval_dataset, EvalDataset)
+
+    if infer_fn is not None:
+        from infermap.evaluator import evaluate_baseline
+        try:
+            if not json_mode:
+                console.print(
+                    f"  [dim]evaluating accuracy ({eval_dataset.metric}) "
+                    f"on {len(eval_dataset.inputs)} samples...[/dim]"
+                )
+            score = evaluate_baseline(infer_fn, eval_dataset)
+            return eval_dataset.metric, score
+        except Exception as exc:
+            err_console.print(f"[yellow]Warning: accuracy eval failed: {exc}[/yellow]")
+            return None
+
+    if results is not None and model is not None and info is not None:
+        from infermap.evaluator import fill_accuracy_drop
+        try:
+            if not json_mode:
+                console.print(
+                    f"  [dim]measuring accuracy drop ({eval_dataset.metric}) "
+                    f"on {len(eval_dataset.inputs)} samples...[/dim]"
+                )
+            fill_accuracy_drop(results, model, info, eval_dataset)
+        except Exception as exc:
+            err_console.print(f"[yellow]Warning: accuracy drop measurement failed: {exc}[/yellow]")
+
+    return None
 
 
 def _prune_with_cost_model(
@@ -673,7 +781,7 @@ def _print_results_table(results: list) -> None:
     console.print(t)
 
 
-def _print_recommendation(rec: object) -> None:
+def _print_recommendation(rec: object, eval_result: tuple | None = None) -> None:
     from infermap.recommender import Recommendation
 
     assert isinstance(rec, Recommendation)
@@ -684,6 +792,11 @@ def _print_recommendation(rec: object) -> None:
         if r.accuracy_drop is not None
         else ""
     )
+    eval_line = (
+        f"  [dim]{eval_result[0]}[/dim]   [bold]{eval_result[1]:.4f}[/bold]\n"
+        if eval_result is not None
+        else ""
+    )
     stats = (
         f"  [dim]batch[/dim]  {r.batch_size}\n"
         f"  [dim]p50[/dim]    [bold]{r.latency_p50_ms:.2f} ms[/bold]\n"
@@ -691,6 +804,7 @@ def _print_recommendation(rec: object) -> None:
         f"  [dim]req/s[/dim]  [bold]{r.throughput_rps:.0f}[/bold]\n"
         f"  [dim]mb[/dim]     {r.memory_mb:.0f}\n"
         + acc_line
+        + eval_line
     )
 
     frontier_note = (

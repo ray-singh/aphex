@@ -47,6 +47,9 @@ class DeploymentConfig:
     generated_at: str
     # system-level serving config (optional)
     system: SystemConfig | None = None
+    # eval (optional — populated when --eval + --infer-fn are provided)
+    eval_metric: str | None = None
+    eval_score: float | None = None
 
 
 def build_config(
@@ -59,6 +62,8 @@ def build_config(
     min_throughput_rps: float | None = None,
     max_quality_loss: float | None = None,
     system: SystemConfig | None = None,
+    eval_metric: str | None = None,
+    eval_score: float | None = None,
 ) -> DeploymentConfig:
     r = rec.result
     return DeploymentConfig(
@@ -89,6 +94,8 @@ def build_config(
         max_quality_loss=max_quality_loss,
         generated_at=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
         system=system,
+        eval_metric=eval_metric,
+        eval_score=eval_score,
     )
 
 
@@ -121,6 +128,8 @@ def config_to_dict(config: DeploymentConfig) -> dict[str, Any]:
             "throughput_rps": config.throughput_rps,
             "memory_mb": config.memory_mb,
             "accuracy_drop": config.accuracy_drop,
+            "eval_metric": config.eval_metric,
+            "eval_score": config.eval_score,
         },
         "constraints": {
             "objective": config.objective,
