@@ -195,6 +195,17 @@ def optimize(
     objective: str = typer.Option("latency", help="Optimization goal: latency, throughput, memory"),
     input_shape: str = typer.Option("3,224,224", "--input-shape", help="Input shape (no batch)"),
     batch_sizes: str = typer.Option("1,2,4,8", "--batch-sizes", help="Comma-separated batch sizes to sweep, e.g. 1,2,4,8"),
+    target: Optional[str] = typer.Option(
+        None, "--target",
+        help="Target cloud instance type or GPU alias, e.g. ml.g4dn.xlarge, a2-highgpu-1g, a100. "
+             "Skips local hardware profiling and optimises for the specified hardware. "
+             "Run 'aphex targets' to see all options.",
+    ),
+    remote: Optional[str] = typer.Option(
+        None, "--remote",
+        help="Run benchmarks on a remote machine via SSH, e.g. user@gpu-host. "
+             "Requires aphex installed on the remote machine.",
+    ),
     max_latency_ms: Optional[float] = typer.Option(None, "--max-latency-ms"),
     max_memory_mb: Optional[float] = typer.Option(None, "--max-memory-mb"),
     min_throughput_rps: Optional[float] = typer.Option(None, "--min-throughput-rps"),
@@ -241,6 +252,29 @@ def optimize(
     timeout_s = timeout if timeout > 0 else None
     json_mode = format_ == "json"
 
+    # ── remote path ───────────────────────────────────────────────────────────
+    if remote is not None:
+        _remote_optimize(
+            host=remote,
+            model_path=model_path,
+            input_shape=input_shape,
+            objective=objective,
+            batch_sizes=batch_sizes,
+            max_latency_ms=max_latency_ms,
+            max_memory_mb=max_memory_mb,
+            min_throughput_rps=min_throughput_rps,
+            max_quality_loss=max_quality_loss,
+            timeout=timeout,
+            output=output,
+            serving=serving,
+            format_=format_,
+            target=target,
+            calibration_data=calibration_data,
+            eval_data=eval_data,
+            infer_fn=infer_fn,
+        )
+        return
+
     if not json_mode:
         _print_header("optimize")
 
@@ -249,8 +283,21 @@ def optimize(
             "[yellow]Warning: --max-quality-loss has no effect without --calibration-data or --eval.[/yellow]"
         )
 
-    with console.status("[bold green]Profiling hardware..."):
-        hw = profile_hardware()
+    if target is not None:
+        from infermap.cloud.instances import get_instance_profile
+        try:
+            hw = get_instance_profile(target)
+        except ValueError as exc:
+            err_console.print(str(exc))
+            raise typer.Exit(code=1)
+        console.print(
+            f"  [dim]target[/dim]  [bold]{target}[/bold]  "
+            f"[dim]({hw.accelerator.name}, {hw.accelerator.memory_gb:.0f} GB VRAM)[/dim]\n"
+        )
+    else:
+        with console.status("[bold green]Profiling hardware..."):
+            hw = profile_hardware()
+
     with console.status("[bold green]Inspecting model..."):
         plugin = get_plugin(model_path)
         info = plugin.inspect(model_path, input_shape=shape)
@@ -611,6 +658,291 @@ def check(
         raise typer.Exit(code=1)
     else:
         console.print("  [green]✓[/green]  [bold green]all checks passed[/bold green]\n")
+
+
+# ---------------------------------------------------------------------------
+# targets
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def targets() -> None:
+    """List all supported cloud instance types and GPU aliases for --target."""
+    from infermap.cloud.instances import list_targets
+
+    _print_header("targets")
+
+    groups = list_targets()
+
+    sections = [
+        ("AWS EC2 / SageMaker", groups["aws"]),
+        ("GCP Compute Engine / Vertex AI", groups["gcp"]),
+        ("Azure", groups["azure"]),
+        ("Short GPU aliases", groups["aliases"]),
+    ]
+
+    for title, items in sections:
+        console.print(Rule(f"[dim]{title}[/dim]", style="dim"))
+        for item in items:
+            console.print(f"  [dim]·[/dim]  {item}")
+        console.print()
+
+
+# ---------------------------------------------------------------------------
+# push / pull / ls
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def push(
+    files: list[Path] = typer.Argument(..., help="Files to upload: deployment.yaml and/or artifact"),
+    name: str = typer.Option(..., "--name", help="Model name in the registry, e.g. resnet50"),
+    version: Optional[str] = typer.Option(
+        None, "--version",
+        help="Version tag (default: auto-generated timestamp, e.g. v20260616-120000)",
+    ),
+    registry: Optional[str] = typer.Option(
+        None, "--registry", help="Override registry URI (e.g. s3://bucket/aphex)"
+    ),
+) -> None:
+    """Upload a model artifact (and deployment.yaml) to the cloud registry.
+
+    \b
+    Examples
+    --------
+      aphex push deployment.yaml model.onnx --name resnet50
+      aphex push deployment.yaml model.engine --name resnet50 --version v2
+    """
+    import datetime
+
+    from infermap.cloud.config import get_registry_uri
+    from infermap.cloud.registry import push as _push
+    from infermap.cloud.storage import get_backend
+
+    _print_header("push")
+
+    missing = [f for f in files if not f.exists()]
+    if missing:
+        for f in missing:
+            err_console.print(f"File not found: {f}")
+        raise typer.Exit(code=1)
+
+    try:
+        uri = registry or get_registry_uri()
+        backend = get_backend(uri)
+    except (RuntimeError, ValueError) as exc:
+        err_console.print(str(exc))
+        raise typer.Exit(code=1)
+
+    ver = version or datetime.datetime.utcnow().strftime("v%Y%m%d-%H%M%S")
+
+    console.print(f"  [dim]registry[/dim]  {uri}")
+    console.print(f"  [dim]pushing[/dim]   [bold]{name}@{ver}[/bold]")
+    console.print()
+
+    try:
+        with console.status(f"[bold green]Uploading {name}@{ver}..."):
+            _push(name, ver, list(files), backend)
+    except Exception as exc:
+        err_console.print(f"Push failed: {exc}")
+        raise typer.Exit(code=1)
+
+    for f in files:
+        size_mb = f.stat().st_size / 1e6
+        console.print(
+            f"  [green]✓[/green]  {name}/{ver}/{f.name}  [dim]({size_mb:.1f} MB)[/dim]"
+        )
+    console.print()
+    console.print(f"  [dim]latest →[/dim] [bold]{ver}[/bold]")
+    console.print()
+
+
+@app.command()
+def pull(
+    name: str = typer.Argument(
+        ..., help="Model name, optionally with version: resnet50 or resnet50@v1"
+    ),
+    out: Path = typer.Option(
+        Path("."), "--out", help="Directory to write downloaded files (default: .)"
+    ),
+    registry: Optional[str] = typer.Option(
+        None, "--registry", help="Override registry URI"
+    ),
+) -> None:
+    """Download a model artifact from the cloud registry.
+
+    \b
+    Examples
+    --------
+      aphex pull resnet50                    # latest version
+      aphex pull resnet50@v2                 # specific version
+      aphex pull resnet50 --out ./models/
+    """
+    from infermap.cloud.config import get_registry_uri
+    from infermap.cloud.registry import pull as _pull
+    from infermap.cloud.storage import get_backend
+
+    _print_header("pull")
+
+    try:
+        uri = registry or get_registry_uri()
+        backend = get_backend(uri)
+    except (RuntimeError, ValueError) as exc:
+        err_console.print(str(exc))
+        raise typer.Exit(code=1)
+
+    console.print(f"  [dim]registry[/dim]  {uri}")
+    console.print(f"  [dim]pulling[/dim]   [bold]{name}[/bold]")
+    console.print()
+
+    try:
+        with console.status(f"[bold green]Downloading {name}..."):
+            written = _pull(name, out, backend)
+    except ValueError as exc:
+        err_console.print(str(exc))
+        raise typer.Exit(code=1)
+    except Exception as exc:
+        err_console.print(f"Pull failed: {exc}")
+        raise typer.Exit(code=1)
+
+    for p in written:
+        size_mb = p.stat().st_size / 1e6
+        console.print(f"  [green]✓[/green]  {p}  [dim]({size_mb:.1f} MB)[/dim]")
+    console.print()
+
+
+@app.command()
+def ls(
+    name: Optional[str] = typer.Argument(
+        None, help="Model name to list versions (omit to list all models)"
+    ),
+    registry: Optional[str] = typer.Option(
+        None, "--registry", help="Override registry URI"
+    ),
+) -> None:
+    """List models and versions in the cloud registry.
+
+    \b
+    Examples
+    --------
+      aphex ls                  # all models
+      aphex ls resnet50         # versions of resnet50
+    """
+    from infermap.cloud.config import get_registry_uri
+    from infermap.cloud.registry import list_models, list_versions
+    from infermap.cloud.storage import get_backend
+
+    _print_header("ls")
+
+    try:
+        uri = registry or get_registry_uri()
+        backend = get_backend(uri)
+    except (RuntimeError, ValueError) as exc:
+        err_console.print(str(exc))
+        raise typer.Exit(code=1)
+
+    console.print(f"  [dim]registry[/dim]  {uri}\n")
+
+    if name:
+        versions = list_versions(name, backend)
+        if not versions:
+            console.print(f"  [dim]no versions found for {name!r}[/dim]")
+        else:
+            for v in versions:
+                console.print(f"  [dim]·[/dim]  {name}[dim]@[/dim][bold]{v}[/bold]")
+    else:
+        models = list_models(backend)
+        if not models:
+            console.print("  [dim]no models in registry[/dim]")
+        else:
+            for m in models:
+                versions = list_versions(m, backend)
+                latest = versions[0] if versions else "—"
+                console.print(
+                    f"  [dim]·[/dim]  [bold]{m}[/bold]  "
+                    f"[dim]({len(versions)} version(s), latest: {latest})[/dim]"
+                )
+    console.print()
+
+
+# ---------------------------------------------------------------------------
+# Remote optimize helper
+# ---------------------------------------------------------------------------
+
+
+def _remote_optimize(
+    host: str,
+    model_path: Path,
+    input_shape: str,
+    objective: str,
+    batch_sizes: str,
+    max_latency_ms: Optional[float],
+    max_memory_mb: Optional[float],
+    min_throughput_rps: Optional[float],
+    max_quality_loss: Optional[float],
+    timeout: float,
+    output: Optional[Path],
+    serving: Optional[str],
+    format_: str,
+    target: Optional[str],
+    calibration_data: Optional[Path],
+    eval_data: Optional[Path],
+    infer_fn: Optional[str],
+) -> None:
+    from infermap.cloud.remote import check_remote_aphex, run_remote_optimize
+
+    _print_header("optimize · remote")
+
+    if target is not None:
+        err_console.print(
+            "[yellow]Warning: --target is ignored with --remote "
+            "(the remote machine profiles its own hardware).[/yellow]"
+        )
+
+    for flag, val in [("--calibration-data", calibration_data),
+                      ("--eval", eval_data), ("--infer-fn", infer_fn)]:
+        if val is not None:
+            err_console.print(
+                f"[yellow]Warning: {flag} references a local path and is not "
+                f"supported with --remote. Skipping.[/yellow]"
+            )
+
+    console.print(f"  [dim]remote[/dim]   [bold]{host}[/bold]")
+    console.print(f"  [dim]model[/dim]    [bold]{model_path}[/bold]\n")
+
+    with console.status("[bold green]Checking remote aphex installation..."):
+        if not check_remote_aphex(host):
+            err_console.print(
+                f"aphex not found on {host}.\n"
+                "Install it with: ssh {host} 'pip install aphex'"
+            )
+            raise typer.Exit(code=1)
+
+    args: list[str] = [
+        "--input-shape", input_shape,
+        "--objective", objective,
+        "--batch-sizes", batch_sizes,
+        "--timeout", str(timeout),
+        "--format", format_,
+    ]
+    if max_latency_ms is not None:
+        args += ["--max-latency-ms", str(max_latency_ms)]
+    if max_memory_mb is not None:
+        args += ["--max-memory-mb", str(max_memory_mb)]
+    if min_throughput_rps is not None:
+        args += ["--min-throughput-rps", str(min_throughput_rps)]
+    if max_quality_loss is not None:
+        args += ["--max-quality-loss", str(max_quality_loss)]
+    if serving is not None:
+        args += ["--serving", serving]
+
+    local_output = output if (output and str(output) != "") else Path("deployment.yaml")
+
+    console.print(f"  [dim]output[/dim]   [bold]{local_output}[/bold]\n")
+
+    exit_code = run_remote_optimize(host, model_path, args, local_output)
+    if exit_code != 0:
+        raise typer.Exit(code=exit_code)
 
 
 # ---------------------------------------------------------------------------
