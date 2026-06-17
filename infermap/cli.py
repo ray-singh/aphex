@@ -304,6 +304,7 @@ def optimize(
             system=sys_cfg,
             eval_metric=eval_result[0] if eval_result else None,
             eval_score=eval_result[1] if eval_result else None,
+            input_shape=shape,
         )
         if write_output:
             write_yaml(cfg, output)  # type: ignore[arg-type]
@@ -331,6 +332,285 @@ def optimize(
             console.print(f"  [dim]serving config ({serving}) →[/dim] [bold]{serving_dir}[/bold]")
         if write_output or serving_dir is not None:
             console.print()
+
+
+# ---------------------------------------------------------------------------
+# convert
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def convert(
+    model_path: Path = typer.Argument(..., help="Path to a saved model (.pt / .pkl / ...)"),
+    backend: Optional[str] = typer.Option(
+        None, "--backend",
+        help="Target backend, e.g. onnx_int8_cpu, pytorch_fp16, tensorrt_fp16.",
+    ),
+    input_shape: Optional[str] = typer.Option(
+        None, "--input-shape",
+        help="Input tensor shape (no batch dim), e.g. 3,224,224. Required unless --from-config is used.",
+    ),
+    output: Optional[Path] = typer.Option(
+        None, "--output",
+        help="Output artifact path. Auto-derived from model name and backend if omitted.",
+    ),
+    from_config: Optional[Path] = typer.Option(
+        None, "--from-config",
+        help="Read backend and input-shape from a deployment.yaml written by aphex optimize.",
+    ),
+    calibration_data: Optional[Path] = typer.Option(
+        None, "--calibration-data",
+        help="Calibration inputs (.pt file or image dir) required for int8 backends.",
+    ),
+) -> None:
+    """Convert a model to its recommended deployment format.
+
+    \b
+    Examples
+    --------
+    # Use the recommendation from a prior 'aphex optimize' run:
+      aphex convert model.pt --from-config deployment.yaml
+
+    # Explicit backend + shape:
+      aphex convert model.pt --backend onnx_int8_cpu --input-shape 3,224,224
+
+    # TensorRT with calibration data:
+      aphex convert model.pt --backend tensorrt_int8 --input-shape 3,224,224 \\
+            --calibration-data calib.pt --output model_int8.engine
+    """
+    from infermap.converter import ALL_CONVERTIBLE, convert as _convert, default_output_path, read_deployment_yaml
+    from infermap.registry import get_plugin
+
+    _print_header("convert")
+
+    # ── resolve backend + shape from --from-config ────────────────────────────
+    resolved_backend = backend
+    resolved_shape_str = input_shape
+
+    if from_config is not None:
+        if not from_config.exists():
+            err_console.print(f"Config file not found: {from_config}")
+            raise typer.Exit(code=1)
+        try:
+            cfg_data = read_deployment_yaml(from_config)
+        except Exception as exc:
+            err_console.print(f"Could not parse {from_config}: {exc}")
+            raise typer.Exit(code=1)
+
+        if resolved_backend is None:
+            resolved_backend = (cfg_data.get("recommendation") or {}).get("backend")
+        if resolved_shape_str is None:
+            resolved_shape_str = (cfg_data.get("model") or {}).get("input_shape")
+
+    # ── validate ──────────────────────────────────────────────────────────────
+    if resolved_backend is None:
+        err_console.print(
+            "No backend specified. Use --backend or --from-config deployment.yaml."
+        )
+        raise typer.Exit(code=1)
+
+    if resolved_backend not in ALL_CONVERTIBLE:
+        err_console.print(
+            f"Backend {resolved_backend!r} cannot be converted to a file artifact. "
+            f"Convertible backends: {', '.join(sorted(ALL_CONVERTIBLE))}"
+        )
+        raise typer.Exit(code=1)
+
+    if resolved_shape_str is None:
+        err_console.print(
+            "No input shape specified. Use --input-shape 3,224,224 or --from-config."
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        shape = [int(x) for x in resolved_shape_str.split(",")]
+    except ValueError:
+        err_console.print(f"Invalid input shape: {resolved_shape_str!r}. Expected comma-separated ints.")
+        raise typer.Exit(code=1)
+
+    out_path = output or default_output_path(model_path, resolved_backend)
+
+    # ── load model + calibration ──────────────────────────────────────────────
+    with console.status("[bold green]Loading model..."):
+        plugin = get_plugin(model_path)
+        model = plugin.load(model_path)
+
+    calib = _load_calibration(calibration_data, shape) if calibration_data else None
+
+    # ── convert ───────────────────────────────────────────────────────────────
+    console.print(
+        f"  [dim]converting[/dim] [bold]{model_path.name}[/bold] "
+        f"[dim]→[/dim] [bold cyan]{resolved_backend}[/bold cyan]"
+    )
+    try:
+        with console.status(f"[bold green]Building {resolved_backend}..."):
+            written = _convert(model, resolved_backend, shape, out_path, calib)
+    except Exception as exc:
+        err_console.print(f"Conversion failed: {exc}")
+        raise typer.Exit(code=1)
+
+    console.print()
+    for p in written:
+        size_mb = p.stat().st_size / 1e6
+        console.print(f"  [green]✓[/green]  {p}  [dim]({size_mb:.1f} MB)[/dim]")
+    console.print()
+
+
+# ---------------------------------------------------------------------------
+# check
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def check(
+    model_path: Path = typer.Argument(..., help="Path to the saved model"),
+    from_config: Path = typer.Option(..., "--from-config", help="deployment.yaml written by aphex optimize"),
+    max_latency_delta: Optional[float] = typer.Option(
+        10.0, "--max-latency-delta",
+        help="Max allowed latency increase in percent (default 10). Pass 0 to disable.",
+    ),
+    min_throughput_delta: Optional[float] = typer.Option(
+        None, "--min-throughput-delta",
+        help="Max allowed throughput drop in percent, e.g. 10 means throughput may not drop >10%%.",
+    ),
+    max_memory_delta: Optional[float] = typer.Option(
+        None, "--max-memory-delta",
+        help="Max allowed memory increase in percent.",
+    ),
+    max_accuracy_drop: Optional[float] = typer.Option(
+        None, "--max-accuracy-drop",
+        help="Max allowed absolute accuracy drop vs baseline eval_score (requires --eval + --infer-fn).",
+    ),
+    warmup: int = typer.Option(5, help="Warm-up iterations (default lower than optimize for speed)"),
+    iters: int = typer.Option(50, help="Measurement iterations"),
+    eval_data: Optional[Path] = typer.Option(None, "--eval", help="Labelled eval data for accuracy re-check"),
+    eval_label_col: str = typer.Option("label", "--eval-label-col"),
+    infer_fn: Optional[str] = typer.Option(None, "--infer-fn", help="Inference callable 'module.py:fn'"),
+) -> None:
+    """Regression-check a model against a saved deployment.yaml baseline.
+
+    \b
+    Benchmarks the recommended backend from a prior 'aphex optimize' run and
+    compares results against the saved performance numbers. Exits 1 if any
+    configured threshold is exceeded — safe to use in CI pipelines.
+
+    \b
+    Examples
+    --------
+      aphex check model.pt --from-config deployment.yaml
+      aphex check model.pt --from-config deployment.yaml --max-latency-delta 15
+      aphex check model.pt --from-config deployment.yaml \\
+            --eval val.pt --infer-fn infer.py:predict --max-accuracy-drop 0.02
+    """
+    from infermap.candidates import DeploymentCandidate
+    from infermap.checker import run_check
+    from infermap.converter import read_deployment_yaml
+    from infermap.registry import get_plugin
+
+    _print_header("check")
+
+    if not from_config.exists():
+        err_console.print(f"Config not found: {from_config}")
+        raise typer.Exit(code=1)
+    try:
+        cfg = read_deployment_yaml(from_config)
+    except Exception as exc:
+        err_console.print(f"Could not parse {from_config}: {exc}")
+        raise typer.Exit(code=1)
+
+    rec = cfg.get("recommendation") or {}
+    perf = cfg.get("performance") or {}
+    model_cfg = cfg.get("model") or {}
+
+    backend = rec.get("backend")
+    if not backend:
+        err_console.print("deployment.yaml has no recommendation.backend — run aphex optimize first.")
+        raise typer.Exit(code=1)
+
+    shape_str = model_cfg.get("input_shape")
+    if not shape_str:
+        err_console.print("deployment.yaml has no model.input_shape — re-run aphex optimize.")
+        raise typer.Exit(code=1)
+    try:
+        shape = [int(x) for x in str(shape_str).split(",")]
+    except ValueError:
+        err_console.print(f"Invalid input_shape in config: {shape_str!r}")
+        raise typer.Exit(code=1)
+
+    batch_size = int(rec.get("batch_size") or 1)
+    description = rec.get("description") or backend
+    device = rec.get("device") or "cpu"
+    dtype = rec.get("dtype") or "fp32"
+
+    console.print(
+        f"  [dim]checking[/dim] [bold]{description}[/bold] "
+        f"[dim]against[/dim] [bold]{from_config}[/bold]"
+    )
+    console.print()
+
+    with console.status("[bold green]Loading model..."):
+        plugin = get_plugin(model_path)
+        model = plugin.load(model_path)
+        info = plugin.inspect(model_path, input_shape=shape)
+
+    cand = DeploymentCandidate(
+        backend=backend,
+        dtype=dtype,
+        description=description,
+        requires_export=False,
+        device=device,
+    )
+
+    with console.status(f"[bold green]Benchmarking {backend}..."):
+        result = plugin.benchmark(cand, model, info, shape, batch_size, warmup, iters, None, None)
+
+    if not result.ok:
+        err_console.print(f"Benchmark failed: {result.error}")
+        raise typer.Exit(code=1)
+
+    # ── optional accuracy re-check ────────────────────────────────────────────
+    observed_eval: float | None = None
+    baseline_eval: float | None = perf.get("eval_score")
+
+    if eval_data and infer_fn:
+        eval_dataset = _load_eval(eval_data, info, eval_label_col)
+        fn = _load_infer_fn(infer_fn)
+        if eval_dataset and fn:
+            from infermap.evaluator import evaluate_baseline
+            try:
+                with console.status("[bold green]Evaluating accuracy..."):
+                    observed_eval = evaluate_baseline(fn, eval_dataset)
+            except Exception as exc:
+                err_console.print(f"[yellow]Warning: accuracy eval failed: {exc}[/yellow]")
+    elif max_accuracy_drop is not None:
+        err_console.print(
+            "[yellow]Warning: --max-accuracy-drop requires --eval + --infer-fn. Skipping accuracy check.[/yellow]"
+        )
+
+    # ── compare ───────────────────────────────────────────────────────────────
+    lat_threshold = max_latency_delta if (max_latency_delta and max_latency_delta > 0) else None
+    check_results = run_check(
+        perf,
+        result.latency_p50_ms,
+        result.latency_p95_ms,
+        result.throughput_rps,
+        result.memory_mb,
+        max_latency_delta_pct=lat_threshold,
+        min_throughput_delta_pct=min_throughput_delta,
+        max_memory_delta_pct=max_memory_delta,
+        baseline_eval_score=baseline_eval,
+        observed_eval_score=observed_eval,
+        max_accuracy_drop=max_accuracy_drop,
+    )
+
+    _print_check_results(check_results)
+
+    failed = [r for r in check_results if not r.passed]
+    if failed:
+        console.print(f"  [red]✗[/red]  [bold red]{len(failed)} check(s) failed[/bold red]\n")
+        raise typer.Exit(code=1)
+    else:
+        console.print("  [green]✓[/green]  [bold green]all checks passed[/bold green]\n")
 
 
 # ---------------------------------------------------------------------------
@@ -779,6 +1059,52 @@ def _print_results_table(results: list) -> None:
 
     console.print(Rule("[dim]results[/dim]", style="dim"))
     console.print(t)
+
+
+def _print_check_results(results: list) -> None:
+    from infermap.checker import CheckResult
+
+    console.print(Rule("[dim]results[/dim]", style="dim"))
+
+    label_w = max(len(r.label) for r in results)
+    for r in results:
+        assert isinstance(r, CheckResult)
+        sign = "+" if r.delta_pct >= 0 else ""
+        delta_str = f"Δ {sign}{r.delta_pct:.1f}%"
+
+        if r.metric in ("latency_p50_ms", "latency_p95_ms"):
+            base_str = f"{r.baseline:.2f} ms"
+            obs_str = f"{r.observed:.2f} ms"
+        elif r.metric == "throughput_rps":
+            base_str = f"{r.baseline:.0f}/s"
+            obs_str = f"{r.observed:.0f}/s"
+        elif r.metric == "memory_mb":
+            base_str = f"{r.baseline:.0f} MB"
+            obs_str = f"{r.observed:.0f} MB"
+        else:
+            base_str = f"{r.baseline:.4f}"
+            obs_str = f"{r.observed:.4f}"
+
+        if r.threshold_pct is None:
+            status = "[dim]—[/dim]"
+            threshold_str = ""
+        elif r.passed:
+            status = "[green]✓[/green]"
+            threshold_str = f"[dim](≤{r.threshold_pct:.0f}%)[/dim]"
+        else:
+            status = "[red]✗[/red]"
+            threshold_str = f"[red](≤{r.threshold_pct:.0f}%)[/red]"
+
+        delta_style = "red" if not r.passed else ("dim" if r.delta_pct <= 0 else "")
+        delta_fmt = f"[{delta_style}]{delta_str}[/{delta_style}]" if delta_style else delta_str
+
+        console.print(
+            f"  {status}  {r.label:<{label_w}}  "
+            f"[dim]{base_str}[/dim] [dim]→[/dim] {obs_str:<12}"
+            f"  {delta_fmt:<14}  {threshold_str}"
+        )
+
+    console.print()
 
 
 def _print_recommendation(rec: object, eval_result: tuple | None = None) -> None:

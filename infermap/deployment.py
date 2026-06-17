@@ -45,6 +45,8 @@ class DeploymentConfig:
     max_quality_loss: float | None
     # meta
     generated_at: str
+    # input shape (no batch dim) — stored so `aphex convert --from-config` is self-contained
+    input_shape: list[int] | None = None
     # system-level serving config (optional)
     system: SystemConfig | None = None
     # eval (optional — populated when --eval + --infer-fn are provided)
@@ -64,6 +66,7 @@ def build_config(
     system: SystemConfig | None = None,
     eval_metric: str | None = None,
     eval_score: float | None = None,
+    input_shape: list[int] | None = None,
 ) -> DeploymentConfig:
     r = rec.result
     return DeploymentConfig(
@@ -93,6 +96,7 @@ def build_config(
         min_throughput_rps=min_throughput_rps,
         max_quality_loss=max_quality_loss,
         generated_at=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        input_shape=input_shape,
         system=system,
         eval_metric=eval_metric,
         eval_score=eval_score,
@@ -106,6 +110,7 @@ def config_to_dict(config: DeploymentConfig) -> dict[str, Any]:
             "framework": config.framework,
             "family": config.family,
             "parameters": config.parameters,
+            "input_shape": ",".join(str(x) for x in config.input_shape) if config.input_shape else None,
         },
         "hardware": {
             "accelerator": config.accelerator_kind,
