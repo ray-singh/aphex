@@ -222,3 +222,11 @@ __marimo__/
 ALPHA_ROADMAP.md
 idea.txt
 note.txt
+
+# Model artifacts and test data
+model.pt
+calib_data.pt
+eval_data.pt
+infer.py
+*.engine
+*.onnx
