@@ -321,7 +321,7 @@ def optimize(
     fn = _load_infer_fn(infer_fn)
     calib = _load_calibration(calibration_data, shape) or (eval_dataset.inputs if eval_dataset else None)
     candidates = plugin.generate_candidates(info, hw)
-    candidates, cost_estimates = _prune_with_cost_model(candidates, info, hw, bs_list[0], json_mode)
+    candidates = _select_with_fingerprint(candidates, info, hw, json_mode)
     results = _run_candidates(plugin, candidates, model, info, shape, bs_list, 10, 100, timeout_s, calib, json_mode=json_mode)
     eval_result = _run_eval(eval_dataset, fn, json_mode, results=results, model=model, info=info)
 
@@ -1071,6 +1071,25 @@ def _run_eval(
             err_console.print(f"[yellow]Warning: accuracy drop measurement failed: {exc}[/yellow]")
 
     return None
+
+
+def _select_with_fingerprint(
+    candidates: list,
+    info: object,
+    hw: object,
+    json_mode: bool,
+) -> list:
+    from infermap.inspector import ModelInfo
+    from infermap.profiler import HardwareProfile
+    from infermap.selector import select_candidates
+
+    assert isinstance(info, ModelInfo)
+    assert isinstance(hw, HardwareProfile)
+
+    selected, rationale = select_candidates(candidates, info, hw, k=4)
+    if not json_mode:
+        console.print(f"  [dim]{rationale}[/dim]\n")
+    return selected
 
 
 def _prune_with_cost_model(
