@@ -13,7 +13,7 @@ dependencies = [
     "psutil>=5.9.0",
     "onnxruntime>=1.17.0",
     "torchinfo>=1.8.0",
-    "onnx>=1.21.0",
+    "onnx>=1.17.0",
 ]
 
 [project.optional-dependencies]
