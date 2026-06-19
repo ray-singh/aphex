@@ -18,6 +18,7 @@ def run_remote_optimize(
     local_model: Path,
     aphex_args: list[str],
     local_output: Path,
+    local_metrics: Path | None = None,
 ) -> int:
     """Run ``aphex optimize`` on *host* via SSH.
 
@@ -26,6 +27,7 @@ def run_remote_optimize(
     3. Runs ``aphex optimize <model> <aphex_args> --output deployment.yaml``
        on the remote, streaming output to the local terminal.
     4. Downloads the resulting deployment.yaml to *local_output*.
+       If *local_metrics* is given, also downloads the metrics JSON.
     5. Cleans up the remote temp directory.
 
     Returns the exit code of the remote aphex command.
@@ -34,17 +36,20 @@ def run_remote_optimize(
     remote_dir = f"/tmp/{session}"
     remote_model = f"{remote_dir}/{local_model.name}"
     remote_output = f"{remote_dir}/deployment.yaml"
+    remote_metrics = f"{remote_dir}/metrics.json" if local_metrics is not None else None
 
     try:
         _run(["ssh", host, f"mkdir -p {remote_dir}"])
 
         _run(["scp", "-q", str(local_model), f"{host}:{remote_model}"])
 
-        remote_cmd = _build_cmd(remote_model, aphex_args, remote_output)
+        remote_cmd = _build_cmd(remote_model, aphex_args, remote_output, remote_metrics)
         exit_code = _stream(["ssh"] + _tty_flag() + [host, remote_cmd])
 
         if exit_code == 0:
             _run(["scp", "-q", f"{host}:{remote_output}", str(local_output)])
+            if remote_metrics and local_metrics is not None:
+                _run(["scp", "-q", f"{host}:{remote_metrics}", str(local_metrics)], check=False)
 
         return exit_code
 
@@ -55,7 +60,7 @@ def run_remote_optimize(
 def check_remote_aphex(host: str) -> bool:
     """Return True if aphex is installed and reachable on *host*."""
     result = subprocess.run(
-        ["ssh", host, "command -v aphex"],
+        ["ssh", host, "PATH=$HOME/.local/bin:$PATH command -v aphex"],
         capture_output=True,
         timeout=15,
     )
@@ -65,10 +70,12 @@ def check_remote_aphex(host: str) -> bool:
 # ── internals ─────────────────────────────────────────────────────────────────
 
 
-def _build_cmd(remote_model: str, aphex_args: list[str], remote_output: str) -> str:
-    parts = ["aphex", "optimize", _quote(remote_model)]
+def _build_cmd(remote_model: str, aphex_args: list[str], remote_output: str, remote_metrics: str | None = None) -> str:
+    parts = ["PATH=$HOME/.local/bin:$PATH", "aphex", "optimize", _quote(remote_model)]
     parts += [_quote(a) for a in aphex_args]
     parts += ["--output", _quote(remote_output)]
+    if remote_metrics:
+        parts += ["--metrics", _quote(remote_metrics)]
     return " ".join(parts)
 
 

@@ -240,6 +240,8 @@ def optimize(
         help="Generate serving configs: triton, torchserve, bentoml, fastapi",
     ),
     format_: str = typer.Option("table", "--format", help="Output format: table | json"),
+    report: Optional[Path] = typer.Option(None, "--report", help="Write HTML benchmark report to this path"),
+    metrics: Optional[Path] = typer.Option(None, "--metrics", help="Write benchmark metrics JSON to this path"),
 ) -> None:
     """Benchmark all candidates and recommend the optimal deployment strategy."""
     from infermap.profiler import profile_hardware
@@ -272,6 +274,8 @@ def optimize(
             calibration_data=calibration_data,
             eval_data=eval_data,
             infer_fn=infer_fn,
+            report=report,
+            metrics=metrics,
         )
         return
 
@@ -379,6 +383,20 @@ def optimize(
             console.print(f"  [dim]serving config ({serving}) →[/dim] [bold]{serving_dir}[/bold]")
         if write_output or serving_dir is not None:
             console.print()
+
+    if metrics or report:
+        payload = _build_metrics_payload(results, rec)
+        if metrics:
+            metrics.write_text(json.dumps(payload, indent=2))
+            if not json_mode:
+                console.print(f"  [dim]metrics →[/dim] [bold]{metrics}[/bold]")
+        if report:
+            from infermap.report import render_report
+            render_report(payload, report)
+            if not json_mode:
+                console.print(f"  [dim]report →[/dim] [bold]{report}[/bold]")
+    if (metrics or report) and not json_mode:
+        console.print()
 
 
 # ---------------------------------------------------------------------------
@@ -888,6 +906,8 @@ def _remote_optimize(
     calibration_data: Optional[Path],
     eval_data: Optional[Path],
     infer_fn: Optional[str],
+    report: Optional[Path] = None,
+    metrics: Optional[Path] = None,
 ) -> None:
     from infermap.cloud.remote import check_remote_aphex, run_remote_optimize
 
@@ -940,9 +960,29 @@ def _remote_optimize(
 
     console.print(f"  [dim]output[/dim]   [bold]{local_output}[/bold]\n")
 
-    exit_code = run_remote_optimize(host, model_path, args, local_output)
-    if exit_code != 0:
-        raise typer.Exit(code=exit_code)
+    import tempfile
+    tmp_metrics: Path | None = None
+    if report is not None and metrics is None:
+        tmp_metrics = Path(tempfile.mktemp(suffix=".json"))
+    local_metrics = metrics or tmp_metrics
+
+    try:
+        exit_code = run_remote_optimize(host, model_path, args, local_output, local_metrics)
+        if exit_code != 0:
+            raise typer.Exit(code=exit_code)
+
+        if local_metrics and local_metrics.exists():
+            if metrics:
+                console.print(f"  [dim]metrics →[/dim] [bold]{metrics}[/bold]")
+            if report:
+                from infermap.report import render_report
+                payload = json.loads(local_metrics.read_text())
+                render_report(payload, report)
+                console.print(f"  [dim]report →[/dim] [bold]{report}[/bold]")
+            console.print()
+    finally:
+        if tmp_metrics and tmp_metrics.exists():
+            tmp_metrics.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1211,7 +1251,7 @@ def _result_to_dict(r: object) -> dict:
     }
 
 
-def _emit_json(results: list, recommendation: object = None) -> None:
+def _build_metrics_payload(results: list, recommendation: object = None) -> dict:
     payload: dict = {"results": [_result_to_dict(r) for r in results]}
     if recommendation is not None:
         from infermap.recommender import Recommendation
@@ -1222,7 +1262,11 @@ def _emit_json(results: list, recommendation: object = None) -> None:
             "rationale": recommendation.rationale,
             "pareto_frontier_count": len(recommendation.pareto_frontier),
         }
-    print(json.dumps(payload, indent=2))
+    return payload
+
+
+def _emit_json(results: list, recommendation: object = None) -> None:
+    print(json.dumps(_build_metrics_payload(results, recommendation), indent=2))
 
 
 # ---------------------------------------------------------------------------
