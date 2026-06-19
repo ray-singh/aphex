@@ -12,7 +12,7 @@ A hardware-aware deployment planner that profiles arbitrary ML models, searches 
 - **Pre-flight checks**: fast feasibility check before committing to a full benchmark run
 - **Multi-backend benchmarking**: PyTorch (FP32/FP16/BF16), ONNX Runtime (CPU/CUDA/CoreML), `torch.compile`, INT8 quantization, TensorRT, OpenVINO
 - **Batch size sweep**: benchmarks every backend across multiple batch sizes in one run
-- **Pareto-optimal recommendation**: picks the best `(backend, batch_size)` pair for your objective (latency, throughput, or memory)
+- **Quality-constrained recommendation**: requires a labelled test dataset; measures accuracy/F1/MAE/RMSE drop from quantization and filters candidates that exceed your tolerance before ranking
 - **Artifact export**: converts the recommended model to its deployment format (`.pt`, `.onnx`, `.engine`, `.xml`)
 - **HTML report**: interactive latency-vs-throughput chart with full candidate table
 - **Remote execution**: runs the full benchmark pipeline on an EC2 instance (or any SSH host) and pulls results back locally
@@ -50,11 +50,15 @@ aphex preflight model.pt --dtype fp16
 # Benchmark all deployment strategies
 aphex benchmark model.pt --input-shape 3,224,224
 
-# Get an optimized recommendation + deployment artifact
-aphex optimize model.pt --input-shape 3,224,224 --objective latency
+# Get an optimized recommendation (eval data required)
+aphex optimize model.pt --input-shape 3,224,224 --eval val.pt --max-accuracy-loss 0.02
+
+# Regression model: constrain by MAE instead
+aphex optimize model.pt --input-shape 16 --eval val.pt --max-mae-loss 0.05 --objective latency
 
 # Save an HTML report and metrics JSON
-aphex optimize model.pt --input-shape 3,224,224 --report report.html --metrics metrics.json
+aphex optimize model.pt --input-shape 3,224,224 --eval val.pt --max-accuracy-loss 0.02 \
+  --report report.html --metrics metrics.json
 ```
 
 ## Example output
@@ -96,10 +100,15 @@ racing 7 backends × 4 batch sizes
 --input-shape 3,224,224     Input tensor shape (no batch dim)
 --batch-sizes 1,2,4,8       Batch sizes to sweep (comma-separated)
 --objective latency          Optimization goal: latency | throughput | memory
+--eval PATH                 Labelled test dataset (.pt, .csv, .parquet, or image dir). Required for optimize.
+--max-accuracy-loss 0.02    Max relative accuracy drop vs original model baseline (classification)
+--max-f1-loss 0.02          Max relative macro-F1 drop vs original model baseline (classification)
+--max-mae-loss 0.05         Max relative MAE increase vs original model baseline (regression)
+--max-rmse-loss 0.05        Max relative RMSE increase vs original model baseline (regression)
 --max-latency-ms 5.0        Hard latency constraint (p50)
 --max-memory-mb 512         Hard memory constraint
 --min-throughput-rps 200    Hard throughput constraint
---calibration-data PATH     .pt file or image dir for INT8 accuracy measurement
+--calibration-data PATH     .pt file or image dir for INT8 quantization calibration
 --format table|json         Output format (json suppresses Rich output)
 --report PATH               Write an HTML benchmark report
 --metrics PATH              Write benchmark metrics as JSON
@@ -117,13 +126,15 @@ Run the full benchmark pipeline on a remote machine — useful when you want res
 # Benchmark on an EC2 instance and pull results back locally
 aphex optimize model.pt \
   --input-shape 3,224,224 \
+  --eval val.pt \
+  --max-accuracy-loss 0.02 \
   --remote ec2-user@<instance-ip> \
   --output deployment.yaml \
   --report report.html \
   --metrics metrics.json
 ```
 
-aphex uploads the model, runs the full benchmark on the remote host, streams output to your terminal, then downloads `deployment.yaml`, the HTML report, and the metrics JSON. The remote temp directory is cleaned up automatically.
+aphex uploads the model and eval dataset, runs the full benchmark on the remote host, streams output to your terminal, then downloads `deployment.yaml`, the HTML report, and the metrics JSON. The remote temp directory is cleaned up automatically.
 
 **Setup**
 
@@ -193,7 +204,10 @@ model.pt + hardware
   benchmark_candidate() × (backends × batch sizes) → p50 / p95 / p99, throughput, memory
        |
        v
-  recommend()         → Pareto frontier → best candidate for objective
+  evaluate_quality()  → accuracy/F1/MAE/RMSE drop vs original model baseline (--eval dataset)
+       |
+       v
+  recommend()         → Pareto frontier → filter by quality constraint → best candidate for objective
        |
        v
   convert()           → deployment artifact (.pt / .onnx / .engine / .xml)

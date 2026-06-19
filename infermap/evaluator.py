@@ -21,6 +21,37 @@ _MAX_EVAL_SAMPLES = 512
 _HIGHER_IS_BETTER = frozenset({"accuracy", "f1_macro", "f1_weighted"})
 _LOWER_IS_BETTER = frozenset({"rmse", "mae"})
 
+METRIC_TASK: dict[str, str] = {
+    "accuracy": "classification",
+    "f1_macro": "classification",
+    "f1_weighted": "classification",
+    "rmse": "regression",
+    "mae": "regression",
+}
+
+
+def infer_task_from_labels(labels: list) -> str:
+    """Infer classification vs regression from label distribution."""
+    if not labels:
+        return "classification"
+    arr = np.array(labels)
+    is_int_like = np.issubdtype(arr.dtype, np.integer) or (
+        np.issubdtype(arr.dtype, np.floating) and np.all(arr == arr.astype(int))
+    )
+    return "classification" if is_int_like and len(np.unique(arr)) <= 50 else "regression"
+
+
+def validate_metric_for_task(metric: str, task: str) -> None:
+    """Raise ValueError if metric doesn't match the detected task."""
+    expected = METRIC_TASK.get(metric)
+    if expected is not None and expected != task:
+        label_type = "continuous" if task == "regression" else "discrete"
+        raise ValueError(
+            f"--max-{metric}-loss is for {expected} tasks, but the eval dataset "
+            f"has {label_type} labels (detected task: {task!r}). "
+            f"Check that you're using the right metric for your model."
+        )
+
 
 @dataclass
 class EvalDataset:
@@ -37,6 +68,7 @@ def load_eval_data(
     info: ModelInfo,
     label_col: str = "label",
     max_samples: int = _MAX_EVAL_SAMPLES,
+    metric_override: str | None = None,
 ) -> EvalDataset:
     """Load labelled eval data.
 
@@ -45,25 +77,35 @@ def load_eval_data(
       .csv / .parquet — tabular; label_col is the target column
       directory — ImageNet-style class subdirs (cat/, dog/, …)
 
-    Inputs are kept as-is so the user's inference function receives them in
-    whatever format their preprocessing expects.
+    If *metric_override* is given (e.g. "mae", "f1_macro"), it is validated
+    against the inferred task from the label distribution and used instead of
+    the auto-detected metric.  Raises ValueError on mismatch.
     """
     task, metric = auto_metric(info)
     path = Path(path)
 
     if path.is_dir():
-        return _load_image_dir(path, info, max_samples, task, metric)
+        dataset = _load_image_dir(path, info, max_samples, task, metric)
+    elif path.suffix.lower() == ".pt":
+        dataset = _load_pt(path, max_samples, task, metric)
+    elif path.suffix.lower() in (".parquet", ".csv"):
+        dataset = _load_tabular(path, label_col, max_samples, task, metric)
+    else:
+        raise ValueError(
+            f"Unsupported eval format {path.suffix.lower()!r}. "
+            f"Supported: .pt, .parquet, .csv, or an image directory with class subdirs."
+        )
 
-    suffix = path.suffix.lower()
-    if suffix == ".pt":
-        return _load_pt(path, max_samples, task, metric)
-    if suffix in (".parquet", ".csv"):
-        return _load_tabular(path, label_col, max_samples, task, metric)
+    inferred_task = infer_task_from_labels(dataset.labels)
+    if metric_override is not None:
+        validate_metric_for_task(metric_override, inferred_task)
+        dataset.task = inferred_task
+        dataset.metric = metric_override
+    elif inferred_task != dataset.task:
+        dataset.task = inferred_task
+        dataset.metric = "rmse" if inferred_task == "regression" else "accuracy"
 
-    raise ValueError(
-        f"Unsupported eval format {suffix!r}. "
-        f"Supported: .pt, .parquet, .csv, or an image directory with class subdirs."
-    )
+    return dataset
 
 
 def _load_pt(path: Path, max_samples: int, task: str, metric: str) -> EvalDataset:
@@ -333,7 +375,7 @@ def fill_accuracy_drop(
     """Mutate BenchmarkResult.accuracy_drop in-place for accuracy-sensitive backends.
 
     Runs each optimized variant on labelled eval data, computes the task metric
-    vs the FP32/native baseline, and writes the relative drop back to the result.
+    vs the original model baseline, and writes the relative drop back to the result.
     """
     framework = (info.framework or "").lower()
     if framework == "pytorch":

@@ -19,11 +19,12 @@ def run_remote_optimize(
     aphex_args: list[str],
     local_output: Path,
     local_metrics: Path | None = None,
+    local_eval: Path | None = None,
 ) -> int:
     """Run ``aphex optimize`` on *host* via SSH.
 
     1. Creates a temporary directory on the remote.
-    2. Uploads *local_model* via scp.
+    2. Uploads *local_model* (and *local_eval* if given) via scp.
     3. Runs ``aphex optimize <model> <aphex_args> --output deployment.yaml``
        on the remote, streaming output to the local terminal.
     4. Downloads the resulting deployment.yaml to *local_output*.
@@ -37,13 +38,25 @@ def run_remote_optimize(
     remote_model = f"{remote_dir}/{local_model.name}"
     remote_output = f"{remote_dir}/deployment.yaml"
     remote_metrics = f"{remote_dir}/metrics.json" if local_metrics is not None else None
+    remote_eval = f"{remote_dir}/{local_eval.name}" if local_eval is not None else None
 
     try:
         _run(["ssh", host, f"mkdir -p {remote_dir}"])
 
         _run(["scp", "-q", str(local_model), f"{host}:{remote_model}"])
 
-        remote_cmd = _build_cmd(remote_model, aphex_args, remote_output, remote_metrics)
+        if local_eval is not None:
+            scp_eval = ["scp", "-q"]
+            if local_eval.is_dir():
+                scp_eval.append("-r")
+            scp_eval += [str(local_eval), f"{host}:{remote_eval}"]
+            _run(scp_eval)
+
+        extra_args = list(aphex_args)
+        if remote_eval is not None:
+            extra_args += ["--eval", remote_eval]
+
+        remote_cmd = _build_cmd(remote_model, extra_args, remote_output, remote_metrics)
         exit_code = _stream(["ssh"] + _tty_flag() + [host, remote_cmd])
 
         if exit_code == 0:

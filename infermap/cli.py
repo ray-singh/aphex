@@ -129,7 +129,7 @@ def benchmark(
     ),
     max_quality_loss: Optional[float] = typer.Option(
         None, "--max-quality-loss",
-        help="Maximum acceptable quality loss vs FP32 baseline (0.0–1.0). Requires --calibration-data or --eval.",
+        help="Maximum acceptable quality loss vs original model baseline (0.0–1.0). Requires --calibration-data or --eval.",
     ),
     format_: str = typer.Option("table", "--format", help="Output format: table | json"),
 ) -> None:
@@ -216,7 +216,7 @@ def optimize(
     ),
     eval_data: Optional[Path] = typer.Option(
         None, "--eval",
-        help="Path to labelled eval data (.pt, .parquet, .csv, or image dir) for real accuracy measurement.",
+        help="Path to labelled eval data (.pt, .parquet, .csv, or image dir). Required for quality measurement.",
     ),
     eval_label_col: str = typer.Option(
         "label", "--eval-label-col",
@@ -227,9 +227,21 @@ def optimize(
         help="Inference callable as 'path/to/module.py:function'. Required with --eval. "
              "Function signature: predict(inputs: list) -> np.ndarray.",
     ),
-    max_quality_loss: Optional[float] = typer.Option(
-        None, "--max-quality-loss",
-        help="Maximum acceptable quality loss vs FP32 baseline (0.0–1.0). Requires --calibration-data or --eval.",
+    max_accuracy_loss: Optional[float] = typer.Option(
+        None, "--max-accuracy-loss",
+        help="Max acceptable accuracy drop vs original model baseline (0.0–1.0). For classification models.",
+    ),
+    max_f1_loss: Optional[float] = typer.Option(
+        None, "--max-f1-loss",
+        help="Max acceptable macro-F1 drop vs original model baseline (0.0–1.0). For classification models.",
+    ),
+    max_mae_loss: Optional[float] = typer.Option(
+        None, "--max-mae-loss",
+        help="Max acceptable relative MAE increase vs original model baseline (0.0–1.0). For regression models.",
+    ),
+    max_rmse_loss: Optional[float] = typer.Option(
+        None, "--max-rmse-loss",
+        help="Max acceptable relative RMSE increase vs original model baseline (0.0–1.0). For regression models.",
     ),
     output: Optional[Path] = typer.Option(
         Path("deployment.yaml"), "--output",
@@ -265,7 +277,10 @@ def optimize(
             max_latency_ms=max_latency_ms,
             max_memory_mb=max_memory_mb,
             min_throughput_rps=min_throughput_rps,
-            max_quality_loss=max_quality_loss,
+            max_accuracy_loss=max_accuracy_loss,
+            max_f1_loss=max_f1_loss,
+            max_mae_loss=max_mae_loss,
+            max_rmse_loss=max_rmse_loss,
             timeout=timeout,
             output=output,
             serving=serving,
@@ -282,10 +297,30 @@ def optimize(
     if not json_mode:
         _print_header("optimize")
 
-    if max_quality_loss is not None and calibration_data is None and eval_data is None:
+    # Resolve dedicated quality-loss flags into a single (metric, threshold) pair.
+    _metric_flags: dict[str, Optional[float]] = {
+        "accuracy": max_accuracy_loss,
+        "f1_macro": max_f1_loss,
+        "mae": max_mae_loss,
+        "rmse": max_rmse_loss,
+    }
+    _specified = {k: v for k, v in _metric_flags.items() if v is not None}
+    if len(_specified) > 1:
         err_console.print(
-            "[yellow]Warning: --max-quality-loss has no effect without --calibration-data or --eval.[/yellow]"
+            f"Specify at most one quality-loss flag. Got: "
+            + ", ".join(f"--max-{k}-loss" for k in _specified)
         )
+        raise typer.Exit(code=1)
+    metric_override: Optional[str] = next(iter(_specified), None)
+    max_quality_loss: Optional[float] = next(iter(_specified.values()), None)
+
+    if eval_data is None:
+        err_console.print(
+            "--eval is required: provide a labelled test dataset so aphex can measure "
+            "quality loss from quantization.\n"
+            "  Example: --eval val.pt --max-accuracy-loss 0.02"
+        )
+        raise typer.Exit(code=1)
 
     if target is not None:
         from infermap.cloud.instances import get_instance_profile
@@ -317,11 +352,8 @@ def optimize(
         if _prompt_unlikely_or_abort():
             min_throughput_rps = None
 
-    if eval_data and not infer_fn:
-        err_console.print("[yellow]Warning: --eval has no effect without --infer-fn.[/yellow]")
-
     model = plugin.load(model_path)
-    eval_dataset = _load_eval(eval_data, info, eval_label_col)
+    eval_dataset = _load_eval(eval_data, info, eval_label_col, metric_override=metric_override, required=True)
     fn = _load_infer_fn(infer_fn)
     calib = _load_calibration(calibration_data, shape) or (eval_dataset.inputs if eval_dataset else None)
     candidates = plugin.generate_candidates(info, hw)
@@ -897,7 +929,10 @@ def _remote_optimize(
     max_latency_ms: Optional[float],
     max_memory_mb: Optional[float],
     min_throughput_rps: Optional[float],
-    max_quality_loss: Optional[float],
+    max_accuracy_loss: Optional[float],
+    max_f1_loss: Optional[float],
+    max_mae_loss: Optional[float],
+    max_rmse_loss: Optional[float],
     timeout: float,
     output: Optional[Path],
     serving: Optional[str],
@@ -919,8 +954,15 @@ def _remote_optimize(
             "(the remote machine profiles its own hardware).[/yellow]"
         )
 
-    for flag, val in [("--calibration-data", calibration_data),
-                      ("--eval", eval_data), ("--infer-fn", infer_fn)]:
+    if eval_data is None:
+        err_console.print(
+            "--eval is required: provide a labelled test dataset so aphex can measure "
+            "quality loss from quantization.\n"
+            "  Example: --eval val.pt --max-accuracy-loss 0.02"
+        )
+        raise typer.Exit(code=1)
+
+    for flag, val in [("--calibration-data", calibration_data), ("--infer-fn", infer_fn)]:
         if val is not None:
             err_console.print(
                 f"[yellow]Warning: {flag} references a local path and is not "
@@ -951,8 +993,14 @@ def _remote_optimize(
         args += ["--max-memory-mb", str(max_memory_mb)]
     if min_throughput_rps is not None:
         args += ["--min-throughput-rps", str(min_throughput_rps)]
-    if max_quality_loss is not None:
-        args += ["--max-quality-loss", str(max_quality_loss)]
+    if max_accuracy_loss is not None:
+        args += ["--max-accuracy-loss", str(max_accuracy_loss)]
+    if max_f1_loss is not None:
+        args += ["--max-f1-loss", str(max_f1_loss)]
+    if max_mae_loss is not None:
+        args += ["--max-mae-loss", str(max_mae_loss)]
+    if max_rmse_loss is not None:
+        args += ["--max-rmse-loss", str(max_rmse_loss)]
     if serving is not None:
         args += ["--serving", serving]
 
@@ -967,7 +1015,7 @@ def _remote_optimize(
     local_metrics = metrics or tmp_metrics
 
     try:
-        exit_code = run_remote_optimize(host, model_path, args, local_output, local_metrics)
+        exit_code = run_remote_optimize(host, model_path, args, local_output, local_metrics, eval_data)
         if exit_code != 0:
             raise typer.Exit(code=exit_code)
 
@@ -1045,15 +1093,27 @@ def _load_calibration_dir(path: Path, input_shape: list[int]) -> list | None:
     return tensors
 
 
-def _load_eval(path: Optional[Path], info: object, label_col: str) -> object:
+def _load_eval(
+    path: Optional[Path],
+    info: object,
+    label_col: str,
+    metric_override: Optional[str] = None,
+    required: bool = False,
+) -> object:
     if path is None:
         return None
     from infermap.evaluator import load_eval_data
     from infermap.inspector import ModelInfo
     assert isinstance(info, ModelInfo)
     try:
-        return load_eval_data(path, info, label_col=label_col)
+        return load_eval_data(path, info, label_col=label_col, metric_override=metric_override)
+    except ValueError as exc:
+        err_console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(code=1)
     except Exception as exc:
+        if required:
+            err_console.print(f"[red]Error loading eval data: {exc}[/red]")
+            raise typer.Exit(code=1)
         err_console.print(f"[yellow]Warning: could not load eval data: {exc}[/yellow]")
         return None
 
