@@ -16,9 +16,6 @@ import copy
 from pathlib import Path
 from typing import Any
 
-import torch
-import torch.nn as nn
-
 from infermap.benchmark import (
     _ensure_quantization_engine,
     _export_to_onnx_bytes,
@@ -105,7 +102,9 @@ def default_output_path(model_path: Path, backend: str) -> Path:
 # ── backend converters ────────────────────────────────────────────────────────
 
 
-def _convert_pytorch(model: nn.Module, backend: str, output_path: Path) -> list[Path]:
+def _convert_pytorch(model: Any, backend: str, output_path: Path) -> list[Path]:
+    import torch
+    import torch.nn as nn
     m = copy.deepcopy(model).cpu().eval()
 
     if backend == "pytorch_fp16":
@@ -133,6 +132,8 @@ def _convert_onnx(
     input_shape: list[int],
     output_path: Path,
 ) -> list[Path]:
+    import torch
+    import torch.nn as nn
     if not isinstance(model, nn.Module):
         return _convert_sklearn_onnx(model, backend, input_shape, output_path)
 
@@ -200,12 +201,13 @@ def _convert_sklearn_onnx(
 
 
 def _convert_tensorrt(
-    model: nn.Module,
+    model: Any,
     backend: str,
     input_shape: list[int],
     output_path: Path,
     calibration_inputs: list[Any] | None = None,
 ) -> list[Path]:
+    import torch
     import tensorrt as trt
 
     from infermap.benchmark import _make_trt_calibrator
@@ -248,14 +250,14 @@ def _convert_tensorrt(
 
 
 def _convert_openvino(
-    model: nn.Module,
+    model: Any,
     backend: str,
     input_shape: list[int],
     output_path: Path,
     calibration_inputs: list[Any] | None = None,
 ) -> list[Path]:
     import io
-
+    import torch
     import openvino as ov
 
     if backend == "openvino_int8" and not calibration_inputs:

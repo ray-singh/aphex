@@ -6,8 +6,6 @@ import gc
 import time
 from dataclasses import dataclass
 from typing import Any
-import torch
-import torch.nn as nn
 from infermap.candidates import DeploymentCandidate
 from infermap.inspector import ModelInfo
 
@@ -38,6 +36,16 @@ _TRT_OV_BACKENDS = frozenset({
 })
 
 
+def _require_torch() -> None:
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        raise ImportError(
+            "PyTorch is required for this operation. "
+            "Install it with: pip install 'aphex[torch]'"
+        ) from None
+
+
 def _ensure_quantization_engine() -> None:
     """Set the torch quantization engine if it hasn't been configured.
 
@@ -45,6 +53,7 @@ def _ensure_quantization_engine() -> None:
     QNNPACK works on ARM; fbgemm works on x86.
     """
     import platform
+    import torch
 
     if torch.backends.quantized.engine in ("none", ""):
         if platform.machine() in ("arm64", "aarch64"):
@@ -53,37 +62,29 @@ def _ensure_quantization_engine() -> None:
             torch.backends.quantized.engine = "fbgemm"
 
 
-class _CompatDynamicLinear(torch.ao.nn.quantized.dynamic.Linear):
-    """DynamicQuantizedLinear with .weight and .bias as dequantized-tensor properties.
-
-    Some architectures (e.g. Swin-T shifted-window attention) bypass nn.Linear.forward
-    and call F.linear(x, submodule.weight, submodule.bias) directly. The base class
-    exposes both as bound methods (not tensors) and the packed weight is qint8, neither
-    of which F.linear accepts. Returning a dequantized float tensor lets those call
-    sites work. Modules called through forward() still use the INT8 kernel path.
-    """
-
-    @property  # type: ignore[override]
-    def weight(self) -> torch.Tensor:
-        return torch.dequantize(self._packed_params._weight_bias()[0])
-
-    @property  # type: ignore[override]
-    def bias(self) -> torch.Tensor | None:
-        return self._packed_params._weight_bias()[1]
-
-
-def _safe_quantize_dynamic(model: nn.Module) -> nn.Module:
+def _safe_quantize_dynamic(model: Any) -> Any:
     """Quantize all nn.Linear modules, then patch DynamicQuantizedLinear.weight
     to be a property so models that access .weight directly (e.g. Swin-T) still work.
     """
     import warnings
+    import torch
+    import torch.nn as nn
+
+    class _CompatDynamicLinear(torch.ao.nn.quantized.dynamic.Linear):
+        """DynamicQuantizedLinear with .weight and .bias as dequantized-tensor properties."""
+
+        @property  # type: ignore[override]
+        def weight(self) -> torch.Tensor:
+            return torch.dequantize(self._packed_params._weight_bias()[0])
+
+        @property  # type: ignore[override]
+        def bias(self) -> torch.Tensor | None:
+            return self._packed_params._weight_bias()[1]
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         qm = torch.ao.quantization.quantize_dynamic(model, {nn.Linear}, dtype=torch.qint8)
 
-    # Change class in-place on every DynamicQuantizedLinear instance so .weight
-    # returns a Tensor rather than a bound method.
     base_cls = torch.ao.nn.quantized.dynamic.Linear
     for mod in qm.modules():
         if type(mod) is base_cls:
@@ -121,11 +122,12 @@ class _TensorRTRunner:
         self._context = self._engine.create_execution_context()
         self._use_v10_api = int(trt.__version__.split(".")[0]) >= 10
 
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+    def __call__(self, x: Any) -> Any:
         x_cuda = x.to("cuda").float().contiguous()
         return self._run_v10(x_cuda) if self._use_v10_api else self._run_v8(x_cuda)
 
-    def _run_v10(self, x: torch.Tensor) -> torch.Tensor:
+    def _run_v10(self, x: Any) -> Any:
+        import torch
         self._context.set_input_shape("input", tuple(x.shape))
         out_shape = tuple(self._context.get_tensor_shape("output"))
         out = torch.empty(out_shape, device="cuda", dtype=torch.float32)
@@ -134,7 +136,8 @@ class _TensorRTRunner:
         self._context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
         return out
 
-    def _run_v8(self, x: torch.Tensor) -> torch.Tensor:
+    def _run_v8(self, x: Any) -> Any:
+        import torch
         engine = self._engine
         in_idx = engine.get_binding_index("input")
         out_idx = engine.get_binding_index("output")
@@ -156,7 +159,8 @@ class _OpenVINORunner:
     def __init__(self, compiled_model: Any) -> None:
         self._infer_req = compiled_model.create_infer_request()
 
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+    def __call__(self, x: Any) -> Any:
+        import torch
         results = self._infer_req.infer({"input": x.cpu().float().numpy()})
         return torch.from_numpy(next(iter(results.values())))
 
@@ -181,6 +185,8 @@ def _serialize_model(
     don't need the original class definitions.
     """
     import io
+    import torch
+    import torch.nn as nn
     from infermap.inspector import _STUB_REGISTRY
 
     # PyTorch 2.x fuses TransformerEncoderLayer into aten::_transformer_encoder_layer_fwd
@@ -251,8 +257,9 @@ def _recreate_stubs(specs: list[tuple[str, str, bool]]) -> None:
             setattr(stub_mod, cls_name, cls)
 
 
-def _deserialize_model(model_payload: tuple[Any, ...]) -> nn.Module:
+def _deserialize_model(model_payload: tuple[Any, ...]) -> Any:
     import io
+    import torch
     from infermap.inspector import _patch_stub_forwards
 
     kind = model_payload[0]
@@ -403,7 +410,7 @@ def _worker_inline(
 
 def _run_benchmark(
     candidate: DeploymentCandidate,
-    model: nn.Module,
+    model: Any,
     model_info: ModelInfo,
     input_shape: list[int],
     batch_size: int,
@@ -411,6 +418,7 @@ def _run_benchmark(
     measure_iters: int,
     calibration_inputs: list[Any] | None = None,
 ) -> BenchmarkResult:
+    import torch
     device = torch.device(candidate.device)
 
     accuracy_drop: float | None = None
@@ -441,10 +449,11 @@ def _run_benchmark(
     )
 
 
-def _export_to_onnx_bytes(model: Any, dummy: torch.Tensor) -> bytes:
+def _export_to_onnx_bytes(model: Any, dummy: Any) -> bytes:
     """Export a model to ONNX and return the raw bytes."""
     import io
     import warnings
+    import torch
 
     buf = io.BytesIO()
     with warnings.catch_warnings():
@@ -464,14 +473,15 @@ def _export_to_onnx_bytes(model: Any, dummy: torch.Tensor) -> bytes:
 
 def _prepare(
     candidate: DeploymentCandidate,
-    model: nn.Module,
+    model: Any,
     input_shape: list[int],
     batch_size: int,
-    device: torch.device,
+    device: Any,
     calibration_inputs: list[Any] | None = None,
-) -> tuple[Any, torch.Tensor, float]:
+) -> tuple[Any, Any, float]:
     import copy
     import warnings
+    import torch
 
     gc.collect()
     if device.type == "cuda":
@@ -708,7 +718,7 @@ def _prepare_openvino(
 
 def _measure_accuracy_drop(
     candidate: DeploymentCandidate,
-    model: nn.Module,
+    model: Any,
     calibration_inputs: list[Any],
 ) -> float | None:
     """Return mean cosine-similarity drop between FP32 and quantized outputs.
@@ -717,18 +727,18 @@ def _measure_accuracy_drop(
     """
     import copy
     import warnings
-
+    import torch
     import torch.nn.functional as F
 
     try:
         fp32_model = copy.deepcopy(model).cpu().eval()
-        fp32_outs: list[torch.Tensor] = []
+        fp32_outs: list[Any] = []
         with torch.no_grad():
             for inp in calibration_inputs:
                 out = fp32_model(inp.float().cpu())
                 fp32_outs.append(out.detach().flatten().float())
 
-        quant_outs: list[torch.Tensor] = []
+        quant_outs: list[Any] = []
 
         if candidate.backend == "pytorch_int8_dynamic":
             _ensure_quantization_engine()
@@ -822,11 +832,12 @@ def _measure_accuracy_drop(
 
 def _time_model(
     model: Any,
-    dummy: torch.Tensor,
-    device: torch.device,
+    dummy: Any,
+    device: Any,
     warmup_iters: int,
     measure_iters: int,
 ) -> list[float]:
+    import torch
     import onnxruntime as ort
 
     is_onnx = isinstance(model, ort.InferenceSession)
@@ -872,9 +883,10 @@ def _time_model(
 
 
 def _measure_memory(
-    model: Any, dummy: torch.Tensor, device: torch.device, weight_mb: float
+    model: Any, dummy: Any, device: Any, weight_mb: float
 ) -> float:
     """Return model memory in MB (weights + peak activations where measurable)."""
+    import torch
     import onnxruntime as ort
 
     # TRT and OV allocate device memory outside PyTorch's allocator.

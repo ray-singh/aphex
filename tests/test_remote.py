@@ -43,7 +43,7 @@ def test_quote_empty_string() -> None:
 
 def test_build_cmd_basic() -> None:
     cmd = _build_cmd("/tmp/s/model.pt", ["--input-shape", "3,224,224"], "/tmp/s/deployment.yaml")
-    assert cmd.startswith("aphex optimize")
+    assert cmd.startswith("PATH=$HOME/.local/bin:$PATH aphex optimize")
     assert "'/tmp/s/model.pt'" in cmd
     assert "'--input-shape'" in cmd
     assert "'3,224,224'" in cmd
@@ -72,7 +72,7 @@ def test_check_remote_aphex_returns_true_on_zero_exit() -> None:
         mock_run.return_value = MagicMock(returncode=0)
         assert check_remote_aphex("user@host") is True
         mock_run.assert_called_once_with(
-            ["ssh", "user@host", "command -v aphex"],
+            ["ssh", "user@host", "PATH=$HOME/.local/bin:$PATH command -v aphex"],
             capture_output=True,
             timeout=15,
         )
