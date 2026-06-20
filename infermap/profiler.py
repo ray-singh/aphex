@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import platform
 import subprocess
 from dataclasses import dataclass, field
 from typing import Literal
+
+logger = logging.getLogger("infermap.profiler")
 
 
 @dataclass
@@ -145,8 +148,8 @@ def _cpu_name() -> str:
                 for line in f:
                     if line.startswith("model name"):
                         return line.split(":", 1)[1].strip()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("CPU name detection failed: %s", exc)
     return platform.processor() or "Unknown CPU"
 
 
@@ -212,15 +215,11 @@ def _apple_chip_name() -> str:
         for line in out.splitlines():
             if "Chip" in line or "Processor Name" in line:
                 return line.split(":", 1)[1].strip()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Apple chip name detection failed: %s", exc)
     return "Apple Silicon"
 
 
 def _apple_supports_bf16(chip_name: str) -> bool:
     name_lower = chip_name.lower()
-    # M2 and later support BF16
-    for gen in ("m2", "m3", "m4", "m5"):
-        if gen in name_lower:
-            return True
-    return False
+    return any(gen in name_lower for gen in ("m2", "m3", "m4", "m5"))

@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 from pathlib import Path
+
 from infermap.deployment import DeploymentConfig
 from infermap.serving.base import ServingGenerator
 
@@ -37,7 +39,7 @@ class BentoMLGenerator(ServingGenerator):
         batch_size = config.system.recommended_batch_size if config.system else config.batch_size
 
         bentofile_lines = [
-            f'service: "service:svc"',
+            'service: "service:svc"',
             "include:",
             "  - service.py",
             "python:",
@@ -58,11 +60,11 @@ class BentoMLGenerator(ServingGenerator):
             f'svc = bentoml.Service("{name}", runners=[runner])',
             "",
             "",
-            f"@svc.api(",
-            f"    input=bentoml.io.NumpyNdarray(),",
-            f"    output=bentoml.io.NumpyNdarray(),",
+            "@svc.api(",
+            "    input=bentoml.io.NumpyNdarray(),",
+            "    output=bentoml.io.NumpyNdarray(),",
             f"    max_batch_size={batch_size},",
-            f")",
+            ")",
             "def predict(input_data: np.ndarray) -> np.ndarray:",
             "    return runner.run(input_data)",
             "",

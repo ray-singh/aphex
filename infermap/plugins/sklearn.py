@@ -6,11 +6,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from infermap.plugin import ModelPlugin
-from infermap.inspector import ModelInfo
-from infermap.profiler import HardwareProfile
-from infermap.candidates import DeploymentCandidate
 from infermap.benchmark import BenchmarkResult
+from infermap.candidates import DeploymentCandidate
+from infermap.inspector import ModelInfo
+from infermap.plugin import ModelPlugin
+from infermap.profiler import HardwareProfile
 
 _SKLEARN_EXTENSIONS = frozenset({".joblib"})
 _XGBOOST_EXTENSIONS = frozenset({".ubj"})   # .json claimed only after header check
@@ -321,8 +321,8 @@ def _xgboost_to_onnx(model: Any) -> bytes:
 
 def _lightgbm_to_onnx(model: Any, n_features: int) -> bytes:
     try:
-        from onnxmltools import convert_lightgbm
         from onnxconverter_common.data_types import FloatTensorType
+        from onnxmltools import convert_lightgbm
 
         onnx_model = convert_lightgbm(
             model,
@@ -448,7 +448,7 @@ def _count_parameters(model: Any, framework: str) -> int:
         if framework == "catboost":
             depth = model.get_all_params().get("depth", 6)
             return getattr(model, "tree_count_", 0) * (2 ** min(depth, 8))
-    except Exception:
+    except Exception:  # noqa: S110 — best-effort introspection, safe to skip
         pass
     return 0
 
@@ -470,7 +470,7 @@ def _count_sklearn_params(model: Any) -> int:
             return n
         if hasattr(model, "support_vectors_"):
             return int(model.support_vectors_.size)
-    except Exception:
+    except Exception:  # noqa: S110 — best-effort introspection, safe to skip
         pass
     return 0
 
@@ -520,16 +520,15 @@ def _get_num_trees(model: Any, framework: str) -> int | None:
             return int(model.num_trees())
         if framework == "catboost":
             return int(getattr(model, "tree_count_", 0)) or None
-    except Exception:
+    except Exception:  # noqa: S110 — best-effort introspection, safe to skip
         pass
     return None
 
 
 def _get_max_depth(model: Any, framework: str) -> int | None:
     try:
-        if framework == "sklearn":
-            if hasattr(model, "max_depth") and model.max_depth is not None:
-                return int(model.max_depth)
+        if framework == "sklearn" and hasattr(model, "max_depth") and model.max_depth is not None:
+            return int(model.max_depth)
         if framework == "xgboost":
             params = model.get_params() if hasattr(model, "get_params") else {}
             booster = model.get_booster() if hasattr(model, "get_booster") else model
@@ -540,7 +539,7 @@ def _get_max_depth(model: Any, framework: str) -> int | None:
             return int(model.params.get("max_depth", -1)) or None
         if framework == "catboost":
             return int(model.get_all_params().get("depth", 6))
-    except Exception:
+    except Exception:  # noqa: S110 — best-effort introspection, safe to skip
         pass
     return None
 
@@ -552,21 +551,21 @@ def _get_n_features(model: Any) -> int | None:
     if hasattr(model, "num_features"):
         try:
             return int(model.num_features())
-        except Exception:
+        except Exception:  # noqa: S110
             pass
     if hasattr(model, "get_booster"):
         try:
             return int(model.get_booster().num_features())
-        except Exception:
+        except Exception:  # noqa: S110
             pass
     if hasattr(model, "num_feature"):
         try:
             return int(model.num_feature())
-        except Exception:
+        except Exception:  # noqa: S110
             pass
     if hasattr(model, "get_feature_names"):
         try:
             return len(model.get_feature_names())
-        except Exception:
+        except Exception:  # noqa: S110
             pass
     return None

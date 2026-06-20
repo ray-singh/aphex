@@ -5,7 +5,9 @@ benchmark result + hardware profile without running additional benchmarks.
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass
+
 from infermap.benchmark import BenchmarkResult
 from infermap.inspector import ModelInfo
 from infermap.profiler import HardwareProfile

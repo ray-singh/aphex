@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 from pathlib import Path
+
 from infermap.deployment import DeploymentConfig
 from infermap.serving.base import ServingGenerator
 

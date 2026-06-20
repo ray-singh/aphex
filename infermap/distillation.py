@@ -25,8 +25,9 @@ dataset loader to avoid coupling to any particular framework outside torch.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable
+from typing import Any
 
 logger = logging.getLogger("infermap.distillation")
 
@@ -287,7 +288,7 @@ def load_student_factory(spec: str) -> Callable[[], Any]:
         sys.path.insert(0, module_dir)
     try:
         module = importlib.util.module_from_spec(spec_obj)
-        spec_obj.loader.exec_module(module)  # type: ignore[union-attr]
+        spec_obj.loader.exec_module(module)
     finally:
         if inserted:
             sys.path.remove(module_dir)

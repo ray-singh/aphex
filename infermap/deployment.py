@@ -1,10 +1,12 @@
 """Deployment config generation — serializes the optimize recommendation to YAML."""
 
 from __future__ import annotations
+
 import datetime
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
 from infermap.inspector import ModelInfo
 from infermap.profiler import HardwareProfile
 from infermap.recommender import Recommendation
@@ -95,7 +97,7 @@ def build_config(
         max_memory_mb=max_memory_mb,
         min_throughput_rps=min_throughput_rps,
         max_quality_loss=max_quality_loss,
-        generated_at=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        generated_at=datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
         input_shape=input_shape,
         system=system,
         eval_metric=eval_metric,

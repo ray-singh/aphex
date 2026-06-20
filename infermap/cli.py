@@ -1,10 +1,12 @@
 """CLI entry point — Typer app with Rich output."""
 
 from __future__ import annotations
+
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 # Must be set before libomp is loaded (i.e. before any torch import).
 # Prevents crash when torch and onnxruntime each ship their own libomp.dylib on macOS.
@@ -70,13 +72,13 @@ def analyze(
 def preflight(
     model_path: Path = typer.Argument(..., help="Path to a saved PyTorch model"),
     dtype: str = typer.Option("fp32", help="Precision to check: fp32, fp16, bf16, int8, int4"),
-    target_throughput: Optional[float] = typer.Option(
+    target_throughput: float | None = typer.Option(
         None, "--target-throughput", help="Required throughput in req/s"
     ),
 ) -> None:
     """Run a fast feasibility check before benchmarking."""
-    from infermap.profiler import profile_hardware
     from infermap.preflight import run_preflight
+    from infermap.profiler import profile_hardware
     from infermap.registry import get_plugin
 
     _print_header("preflight")
@@ -110,11 +112,11 @@ def benchmark(
     warmup: int = typer.Option(10, help="Warm-up iterations"),
     iters: int = typer.Option(100, help="Measurement iterations"),
     timeout: float = typer.Option(180.0, "--timeout", help="Per-candidate timeout in seconds (0 = no limit)"),
-    calibration_data: Optional[Path] = typer.Option(
+    calibration_data: Path | None = typer.Option(
         None, "--calibration-data",
         help="Path to a .pt file (or image directory) with unlabelled calibration inputs for int8 quantization.",
     ),
-    eval_data: Optional[str] = typer.Option(
+    eval_data: str | None = typer.Option(
         None, "--eval",
         help="Path to labelled eval data (.pt, .parquet, .csv, or image dir), or a cloud URI (s3://, gs://). For real accuracy measurement.",
     ),
@@ -122,12 +124,12 @@ def benchmark(
         "label", "--eval-label-col",
         help="Column name for labels when --eval points to a .parquet or .csv file.",
     ),
-    infer_fn: Optional[str] = typer.Option(
+    infer_fn: str | None = typer.Option(
         None, "--infer-fn",
         help="Inference callable as 'path/to/module.py:function'. Required with --eval. "
              "Function signature: predict(inputs: list) -> np.ndarray.",
     ),
-    max_quality_loss: Optional[float] = typer.Option(
+    max_quality_loss: float | None = typer.Option(
         None, "--max-quality-loss",
         help="Maximum acceptable quality loss vs original model baseline (0.0–1.0). Requires --calibration-data or --eval.",
     ),
@@ -140,8 +142,8 @@ def benchmark(
     ),
 ) -> None:
     """Benchmark all candidate deployment strategies."""
-    from infermap.profiler import profile_hardware
     from infermap.preflight import run_preflight
+    from infermap.profiler import profile_hardware
     from infermap.registry import get_plugin
 
     shape = _parse_shape(input_shape)
@@ -202,26 +204,26 @@ def optimize(
     objective: str = typer.Option("latency", help="Optimization goal: latency, throughput, memory"),
     input_shape: str = typer.Option("3,224,224", "--input-shape", help="Input shape (no batch)"),
     batch_sizes: str = typer.Option("1,2,4,8", "--batch-sizes", help="Comma-separated batch sizes to sweep, e.g. 1,2,4,8"),
-    target: Optional[str] = typer.Option(
+    target: str | None = typer.Option(
         None, "--target",
         help="Target cloud instance type or GPU alias, e.g. ml.g4dn.xlarge, a2-highgpu-1g, a100. "
              "Skips local hardware profiling and optimises for the specified hardware. "
              "Run 'aphex targets' to see all options.",
     ),
-    remote: Optional[str] = typer.Option(
+    remote: str | None = typer.Option(
         None, "--remote",
         help="Run benchmarks on a remote machine via SSH, e.g. user@gpu-host. "
              "Requires aphex installed on the remote machine.",
     ),
-    max_latency_ms: Optional[float] = typer.Option(None, "--max-latency-ms"),
-    max_memory_mb: Optional[float] = typer.Option(None, "--max-memory-mb"),
-    min_throughput_rps: Optional[float] = typer.Option(None, "--min-throughput-rps"),
+    max_latency_ms: float | None = typer.Option(None, "--max-latency-ms"),
+    max_memory_mb: float | None = typer.Option(None, "--max-memory-mb"),
+    min_throughput_rps: float | None = typer.Option(None, "--min-throughput-rps"),
     timeout: float = typer.Option(180.0, "--timeout", help="Per-candidate timeout in seconds (0 = no limit)"),
-    calibration_data: Optional[Path] = typer.Option(
+    calibration_data: Path | None = typer.Option(
         None, "--calibration-data",
         help="Path to a .pt file (or image directory) with unlabelled calibration inputs for int8 quantization.",
     ),
-    eval_data: Optional[str] = typer.Option(
+    eval_data: str | None = typer.Option(
         None, "--eval",
         help="Path to labelled eval data (.pt, .parquet, .csv, or image dir), or a cloud URI (s3://, gs://). Required for quality measurement.",
     ),
@@ -229,38 +231,38 @@ def optimize(
         "label", "--eval-label-col",
         help="Column name for labels when --eval points to a .parquet or .csv file.",
     ),
-    infer_fn: Optional[str] = typer.Option(
+    infer_fn: str | None = typer.Option(
         None, "--infer-fn",
         help="Inference callable as 'path/to/module.py:function'. Required with --eval. "
              "Function signature: predict(inputs: list) -> np.ndarray.",
     ),
-    max_accuracy_loss: Optional[float] = typer.Option(
+    max_accuracy_loss: float | None = typer.Option(
         None, "--max-accuracy-loss",
         help="Max acceptable accuracy drop vs original model baseline (0.0–1.0). For classification models.",
     ),
-    max_f1_loss: Optional[float] = typer.Option(
+    max_f1_loss: float | None = typer.Option(
         None, "--max-f1-loss",
         help="Max acceptable macro-F1 drop vs original model baseline (0.0–1.0). For classification models.",
     ),
-    max_mae_loss: Optional[float] = typer.Option(
+    max_mae_loss: float | None = typer.Option(
         None, "--max-mae-loss",
         help="Max acceptable relative MAE increase vs original model baseline (0.0–1.0). For regression models.",
     ),
-    max_rmse_loss: Optional[float] = typer.Option(
+    max_rmse_loss: float | None = typer.Option(
         None, "--max-rmse-loss",
         help="Max acceptable relative RMSE increase vs original model baseline (0.0–1.0). For regression models.",
     ),
-    output: Optional[Path] = typer.Option(
+    output: Path | None = typer.Option(
         Path("deployment.yaml"), "--output",
         help="Write deployment config to this path (default: deployment.yaml). Pass '' to skip.",
     ),
-    serving: Optional[str] = typer.Option(
+    serving: str | None = typer.Option(
         None, "--serving",
         help="Generate serving configs: triton, torchserve, bentoml, fastapi",
     ),
     format_: str = typer.Option("table", "--format", help="Output format: table | json"),
-    report: Optional[Path] = typer.Option(None, "--report", help="Write HTML benchmark report to this path"),
-    metrics: Optional[Path] = typer.Option(None, "--metrics", help="Write benchmark metrics JSON to this path"),
+    report: Path | None = typer.Option(None, "--report", help="Write HTML benchmark report to this path"),
+    metrics: Path | None = typer.Option(None, "--metrics", help="Write benchmark metrics JSON to this path"),
     jobs: int = typer.Option(
         1, "--jobs", "-j", min=1,
         help="Number of (candidate, batch_size) pairs to benchmark in parallel. "
@@ -268,8 +270,8 @@ def optimize(
     ),
 ) -> None:
     """Benchmark all candidates and recommend the optimal deployment strategy."""
-    from infermap.profiler import profile_hardware
     from infermap.preflight import run_preflight
+    from infermap.profiler import profile_hardware
     from infermap.recommender import recommend
     from infermap.registry import get_plugin
 
@@ -310,7 +312,7 @@ def optimize(
         _print_header("optimize")
 
     # Resolve dedicated quality-loss flags into a single (metric, threshold) pair.
-    _metric_flags: dict[str, Optional[float]] = {
+    _metric_flags: dict[str, float | None] = {
         "accuracy": max_accuracy_loss,
         "f1_macro": max_f1_loss,
         "mae": max_mae_loss,
@@ -319,12 +321,12 @@ def optimize(
     _specified = {k: v for k, v in _metric_flags.items() if v is not None}
     if len(_specified) > 1:
         err_console.print(
-            f"Specify at most one quality-loss flag. Got: "
+            "Specify at most one quality-loss flag. Got: "
             + ", ".join(f"--max-{k}-loss" for k in _specified)
         )
         raise typer.Exit(code=1)
-    metric_override: Optional[str] = next(iter(_specified), None)
-    max_quality_loss: Optional[float] = next(iter(_specified.values()), None)
+    metric_override: str | None = next(iter(_specified), None)
+    max_quality_loss: float | None = next(iter(_specified.values()), None)
 
     if eval_data is None:
         err_console.print(
@@ -360,9 +362,8 @@ def optimize(
         if json_mode:
             print(json.dumps({"error": pf.message, "category": "impossible"}, indent=2))
         raise typer.Exit(code=1)
-    if pf.category == "unlikely" and not json_mode:
-        if _prompt_unlikely_or_abort():
-            min_throughput_rps = None
+    if pf.category == "unlikely" and not json_mode and _prompt_unlikely_or_abort():
+        min_throughput_rps = None
 
     model = plugin.load(model_path)
     eval_dataset = _load_eval(eval_data, info, eval_label_col, metric_override=metric_override, required=True)
@@ -405,7 +406,7 @@ def optimize(
             write_yaml(cfg, output)  # type: ignore[arg-type]
 
         if serving:
-            from infermap.serving import generate_serving_config, SUPPORTED_FRAMEWORKS
+            from infermap.serving import SUPPORTED_FRAMEWORKS, generate_serving_config
             if serving not in SUPPORTED_FRAMEWORKS:
                 err_console.print(
                     f"Unknown serving framework {serving!r}. "
@@ -451,23 +452,23 @@ def optimize(
 @app.command()
 def convert(
     model_path: Path = typer.Argument(..., help="Path to a saved model (.pt / .pkl / ...)"),
-    backend: Optional[str] = typer.Option(
+    backend: str | None = typer.Option(
         None, "--backend",
         help="Target backend, e.g. onnx_int8_cpu, pytorch_fp16, tensorrt_fp16.",
     ),
-    input_shape: Optional[str] = typer.Option(
+    input_shape: str | None = typer.Option(
         None, "--input-shape",
         help="Input tensor shape (no batch dim), e.g. 3,224,224. Required unless --from-config is used.",
     ),
-    output: Optional[Path] = typer.Option(
+    output: Path | None = typer.Option(
         None, "--output",
         help="Output artifact path. Auto-derived from model name and backend if omitted.",
     ),
-    from_config: Optional[Path] = typer.Option(
+    from_config: Path | None = typer.Option(
         None, "--from-config",
         help="Read backend and input-shape from a deployment.yaml written by aphex optimize.",
     ),
-    calibration_data: Optional[Path] = typer.Option(
+    calibration_data: Path | None = typer.Option(
         None, "--calibration-data",
         help="Calibration inputs (.pt file or image dir) required for int8 backends.",
     ),
@@ -487,7 +488,8 @@ def convert(
       aphex convert model.pt --backend tensorrt_int8 --input-shape 3,224,224 \\
             --calibration-data calib.pt --output model_int8.engine
     """
-    from infermap.converter import ALL_CONVERTIBLE, convert as _convert, default_output_path, read_deployment_yaml
+    from infermap.converter import ALL_CONVERTIBLE, default_output_path, read_deployment_yaml
+    from infermap.converter import convert as _convert
     from infermap.registry import get_plugin
 
     _print_header("convert")
@@ -574,27 +576,27 @@ def convert(
 def check(
     model_path: Path = typer.Argument(..., help="Path to the saved model"),
     from_config: Path = typer.Option(..., "--from-config", help="deployment.yaml written by aphex optimize"),
-    max_latency_delta: Optional[float] = typer.Option(
+    max_latency_delta: float | None = typer.Option(
         10.0, "--max-latency-delta",
         help="Max allowed latency increase in percent (default 10). Pass 0 to disable.",
     ),
-    min_throughput_delta: Optional[float] = typer.Option(
+    min_throughput_delta: float | None = typer.Option(
         None, "--min-throughput-delta",
         help="Max allowed throughput drop in percent, e.g. 10 means throughput may not drop >10%%.",
     ),
-    max_memory_delta: Optional[float] = typer.Option(
+    max_memory_delta: float | None = typer.Option(
         None, "--max-memory-delta",
         help="Max allowed memory increase in percent.",
     ),
-    max_accuracy_drop: Optional[float] = typer.Option(
+    max_accuracy_drop: float | None = typer.Option(
         None, "--max-accuracy-drop",
         help="Max allowed absolute accuracy drop vs baseline eval_score (requires --eval + --infer-fn).",
     ),
     warmup: int = typer.Option(5, help="Warm-up iterations (default lower than optimize for speed)"),
     iters: int = typer.Option(50, help="Measurement iterations"),
-    eval_data: Optional[str] = typer.Option(None, "--eval", help="Labelled eval data for accuracy re-check (path or cloud URI)"),
+    eval_data: str | None = typer.Option(None, "--eval", help="Labelled eval data for accuracy re-check (path or cloud URI)"),
     eval_label_col: str = typer.Option("label", "--eval-label-col"),
-    infer_fn: Optional[str] = typer.Option(None, "--infer-fn", help="Inference callable 'module.py:fn'"),
+    infer_fn: str | None = typer.Option(None, "--infer-fn", help="Inference callable 'module.py:fn'"),
 ) -> None:
     """Regression-check a model against a saved deployment.yaml baseline.
 
@@ -763,7 +765,7 @@ def distill(
         Path("student.pt"), "--output",
         help="Where to write the distilled student state_dict.",
     ),
-    report_path: Optional[Path] = typer.Option(
+    report_path: Path | None = typer.Option(
         None, "--report",
         help="Optional JSON report with losses, parameter counts, and scores.",
     ),
@@ -789,7 +791,8 @@ def distill(
             --eval imagenet_subset/ --task classification \\
             --temperature 3 --alpha 0.8 --device cuda
     """
-    from infermap.distillation import DistillConfig, distill as _distill_fn, load_student_factory, score
+    from infermap.distillation import DistillConfig, load_student_factory, score
+    from infermap.distillation import distill as _distill_fn
     from infermap.evaluator import load_eval_data
     from infermap.registry import get_plugin
 
@@ -920,11 +923,11 @@ def targets() -> None:
 def push(
     files: list[Path] = typer.Argument(..., help="Files to upload: deployment.yaml and/or artifact"),
     name: str = typer.Option(..., "--name", help="Model name in the registry, e.g. resnet50"),
-    version: Optional[str] = typer.Option(
+    version: str | None = typer.Option(
         None, "--version",
         help="Version tag (default: auto-generated timestamp, e.g. v20260616-120000)",
     ),
-    registry: Optional[str] = typer.Option(
+    registry: str | None = typer.Option(
         None, "--registry", help="Override registry URI (e.g. s3://bucket/aphex)"
     ),
 ) -> None:
@@ -988,7 +991,7 @@ def pull(
     out: Path = typer.Option(
         Path("."), "--out", help="Directory to write downloaded files (default: .)"
     ),
-    registry: Optional[str] = typer.Option(
+    registry: str | None = typer.Option(
         None, "--registry", help="Override registry URI"
     ),
 ) -> None:
@@ -1036,10 +1039,10 @@ def pull(
 
 @app.command()
 def ls(
-    name: Optional[str] = typer.Argument(
+    name: str | None = typer.Argument(
         None, help="Model name to list versions (omit to list all models)"
     ),
-    registry: Optional[str] = typer.Option(
+    registry: str | None = typer.Option(
         None, "--registry", help="Override registry URI"
     ),
 ) -> None:
@@ -1099,23 +1102,23 @@ def _remote_optimize(
     input_shape: str,
     objective: str,
     batch_sizes: str,
-    max_latency_ms: Optional[float],
-    max_memory_mb: Optional[float],
-    min_throughput_rps: Optional[float],
-    max_accuracy_loss: Optional[float],
-    max_f1_loss: Optional[float],
-    max_mae_loss: Optional[float],
-    max_rmse_loss: Optional[float],
+    max_latency_ms: float | None,
+    max_memory_mb: float | None,
+    min_throughput_rps: float | None,
+    max_accuracy_loss: float | None,
+    max_f1_loss: float | None,
+    max_mae_loss: float | None,
+    max_rmse_loss: float | None,
     timeout: float,
-    output: Optional[Path],
-    serving: Optional[str],
+    output: Path | None,
+    serving: str | None,
     format_: str,
-    target: Optional[str],
-    calibration_data: Optional[Path],
-    eval_data: Optional[str],
-    infer_fn: Optional[str],
-    report: Optional[Path] = None,
-    metrics: Optional[Path] = None,
+    target: str | None,
+    calibration_data: Path | None,
+    eval_data: str | None,
+    infer_fn: str | None,
+    report: Path | None = None,
+    metrics: Path | None = None,
 ) -> None:
     from infermap.cloud.remote import check_remote_aphex, run_remote_optimize
 
@@ -1289,7 +1292,7 @@ def _parse_batch_sizes(s: str) -> list[int]:
 
 
 def _resolve_calibration(
-    path: Optional[Path], shape: list[int], eval_dataset: object
+    path: Path | None, shape: list[int], eval_dataset: object
 ) -> list | None:
     """Return calibration inputs, falling back to eval inputs with a clear warning."""
     calib = _load_calibration(path, shape)
@@ -1309,13 +1312,14 @@ def _resolve_calibration(
     return eval_inputs[:_CALIB_MAX_SAMPLES]
 
 
-def _load_calibration(path: Optional[Path], input_shape: list[int]) -> list | None:
+def _load_calibration(path: Path | None, input_shape: list[int]) -> list | None:
     if path is None:
         return None
     if path.is_dir():
         return _load_calibration_dir(path, input_shape)
-    from infermap.evaluator import _torch_load
     import torch
+
+    from infermap.evaluator import _torch_load
     raw = _torch_load(path)
     if isinstance(raw, torch.Tensor):
         return [raw[i : i + 1] for i in range(min(raw.size(0), _CALIB_MAX_SAMPLES))]
@@ -1325,7 +1329,6 @@ def _load_calibration(path: Optional[Path], input_shape: list[int]) -> list | No
 
 
 def _load_calibration_dir(path: Path, input_shape: list[int]) -> list | None:
-    import torch
     import torchvision.transforms.functional as TF
     from PIL import Image
 
@@ -1360,10 +1363,10 @@ def _load_calibration_dir(path: Path, input_shape: list[int]) -> list | None:
 
 
 def _load_eval(
-    path: Optional[str],
+    path: str | None,
     info: object,
     label_col: str,
-    metric_override: Optional[str] = None,
+    metric_override: str | None = None,
     required: bool = False,
 ) -> object:
     if path is None:
@@ -1385,7 +1388,7 @@ def _load_eval(
         return None
 
 
-def _load_infer_fn(spec: Optional[str]) -> object:
+def _load_infer_fn(spec: str | None) -> object:
     if spec is None:
         return None
     from infermap.evaluator import load_infer_fn
@@ -1510,7 +1513,7 @@ def _run_candidates(
 
     def _bench(pair: tuple[object, int]) -> object:
         cand, bs = pair
-        return plugin.benchmark(  # type: ignore[arg-type]
+        return plugin.benchmark(
             cand, model, model_info, shape, bs, warmup, iters,
             timeout_s, calibration_inputs,
         )
@@ -1575,7 +1578,7 @@ def _run_candidates(
 
 def _run_pairs_parallel(
     pairs: list[tuple[object, int]],
-    bench_fn: "Callable[[tuple[object, int]], object]",
+    bench_fn: Callable[[tuple[object, int]], object],
     jobs: int,
 ) -> list:
     from concurrent.futures import ThreadPoolExecutor

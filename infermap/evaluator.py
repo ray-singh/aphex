@@ -12,9 +12,10 @@ import copy as _copy
 import logging
 import os
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlparse
 
 import numpy as np
@@ -309,13 +310,13 @@ def _load_tabular(
     suffix = path.suffix.lower()
     if suffix == ".parquet":
         try:
-            import pandas as pd  # type: ignore[import]
+            import pandas as pd
             df = pd.read_parquet(path)
         except ImportError:
             raise ImportError("pandas and pyarrow are required to read .parquet files.")
     else:
         try:
-            import pandas as pd  # type: ignore[import]
+            import pandas as pd
             df = pd.read_csv(path)
         except ImportError:
             raise ImportError("pandas is required to read .csv files.")
@@ -345,9 +346,8 @@ def _load_image_dir(
     path: Path, info: ModelInfo, max_samples: int, task: str, metric: str
 ) -> EvalDataset:
     """Load images from class subdirectories (ImageNet-style)."""
-    import torch
     import torchvision.transforms.functional as TF
-    from PIL import Image  # type: ignore[import]
+    from PIL import Image
 
     _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
     _IMAGENET_MEAN = [0.485, 0.456, 0.406]
@@ -434,7 +434,7 @@ def load_infer_fn(spec: str) -> Callable[[list], Any]:
 
     try:
         module = importlib.util.module_from_spec(spec_obj)
-        spec_obj.loader.exec_module(module)  # type: ignore[union-attr]
+        spec_obj.loader.exec_module(module)
     finally:
         if inserted:
             sys.path.remove(module_dir)
@@ -491,7 +491,7 @@ def compute_metric(outputs: list[Any], labels: list[Any], metric: str) -> float:
         return float((preds == gts).mean())
 
     if metric in ("f1_macro", "f1_weighted"):
-        from sklearn.metrics import f1_score  # type: ignore[import]
+        from sklearn.metrics import f1_score
         avg = "macro" if metric == "f1_macro" else "weighted"
         if preds.ndim > 1:
             preds = preds.argmax(axis=-1)
@@ -661,7 +661,11 @@ def _run_pytorch_candidate(
     """
     import torch
 
-    from infermap.benchmark import _ensure_quantization_engine, _export_to_onnx_bytes, _safe_quantize_dynamic
+    from infermap.benchmark import (
+        _ensure_quantization_engine,
+        _export_to_onnx_bytes,
+        _safe_quantize_dynamic,
+    )
 
     backend = candidate.backend
 

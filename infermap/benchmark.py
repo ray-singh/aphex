@@ -7,6 +7,7 @@ import logging
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
 from infermap.candidates import DeploymentCandidate
 from infermap.inspector import ModelInfo
 
@@ -97,6 +98,7 @@ def _ensure_quantization_engine() -> None:
     QNNPACK works on ARM; fbgemm works on x86.
     """
     import platform
+
     import torch
 
     if torch.backends.quantized.engine in ("none", ""):
@@ -116,6 +118,7 @@ def _safe_quantize_dynamic(model: Any) -> Any:
     accessor, the patch is skipped.
     """
     import warnings
+
     import torch
     import torch.nn as nn
 
@@ -129,11 +132,11 @@ def _safe_quantize_dynamic(model: Any) -> Any:
         return qm
 
     class _CompatDynamicLinear(base_cls):  # type: ignore[misc, valid-type]
-        @property  # type: ignore[override]
+        @property
         def weight(self) -> torch.Tensor:
             return torch.dequantize(self._packed_params._weight_bias()[0])
 
-        @property  # type: ignore[override]
+        @property
         def bias(self) -> torch.Tensor | None:
             return self._packed_params._weight_bias()[1]
 
@@ -248,8 +251,10 @@ def _serialize_model(
     don't need the original class definitions.
     """
     import io
+
     import torch
     import torch.nn as nn
+
     from infermap.inspector import _STUB_REGISTRY
 
     # PyTorch 2.x fuses TransformerEncoderLayer into aten::_transformer_encoder_layer_fwd
@@ -303,6 +308,7 @@ def _recreate_stubs(specs: list[tuple[str, str, bool]]) -> None:
     """Recreate stub classes in sys.modules so torch.load can unpickle stub models."""
     import sys
     import types
+
     import torch.nn as nn
 
     for mod_name, cls_name, is_nn_mod in specs:
@@ -322,7 +328,9 @@ def _recreate_stubs(specs: list[tuple[str, str, bool]]) -> None:
 
 def _deserialize_model(model_payload: tuple[Any, ...]) -> Any:
     import io
+
     import torch
+
     from infermap.inspector import _patch_stub_forwards
 
     kind = model_payload[0]
@@ -535,6 +543,7 @@ def _export_to_onnx_bytes(model: Any, dummy: Any) -> bytes:
     """Export a model to ONNX and return the raw bytes."""
     import io
     import warnings
+
     import torch
 
     buf = io.BytesIO()
@@ -563,6 +572,7 @@ def _prepare(
 ) -> tuple[Any, Any, float]:
     import copy
     import warnings
+
     import torch
 
     gc.collect()
@@ -748,7 +758,7 @@ def _prepare_tensorrt(
     model: Any,
     dummy: torch.Tensor,
     calibration_inputs: list[Any] | None,
-) -> tuple["_TensorRTRunner", torch.Tensor, float]:
+) -> tuple[_TensorRTRunner, torch.Tensor, float]:
     """Build a TensorRT engine from an nn.Module; return (runner, dummy, engine_mb)."""
     import tensorrt as trt
 
@@ -793,7 +803,7 @@ def _prepare_openvino(
     model: Any,
     dummy: torch.Tensor,
     calibration_inputs: list[Any] | None,
-) -> tuple["_OpenVINORunner", torch.Tensor, float]:
+) -> tuple[_OpenVINORunner, torch.Tensor, float]:
     """Convert an nn.Module to an OpenVINO compiled model; return (runner, dummy, model_mb)."""
     import io
 
@@ -839,6 +849,7 @@ def _measure_accuracy_drop(
     """
     import copy
     import warnings
+
     import torch
     import torch.nn.functional as F
 
@@ -945,7 +956,7 @@ def _measure_accuracy_drop(
             return None
 
         drops = []
-        for fp32_out, quant_out in zip(fp32_outs, quant_outs):
+        for fp32_out, quant_out in zip(fp32_outs, quant_outs, strict=False):
             if fp32_out.numel() == 0:
                 continue
             sim = F.cosine_similarity(fp32_out.unsqueeze(0), quant_out.unsqueeze(0)).item()
@@ -965,8 +976,8 @@ def _time_model(
     warmup_iters: int,
     measure_iters: int,
 ) -> list[float]:
-    import torch
     import onnxruntime as ort
+    import torch
 
     is_onnx = isinstance(model, ort.InferenceSession)
 
@@ -981,7 +992,7 @@ def _time_model(
         if device.type == "cuda":
             torch.cuda.synchronize()
         elif device.type == "mps":
-            torch.mps.synchronize()  # type: ignore[attr-defined]
+            torch.mps.synchronize()
 
     # Warm-up
     for _ in range(warmup_iters):
@@ -1014,8 +1025,8 @@ def _measure_memory(
     model: Any, dummy: Any, device: Any, weight_mb: float
 ) -> float:
     """Return model memory in MB (weights + peak activations where measurable)."""
-    import torch
     import onnxruntime as ort
+    import torch
 
     # TRT and OV allocate device memory outside PyTorch's allocator.
     # Return the engine/model size set during _prepare as a proxy.
@@ -1032,12 +1043,12 @@ def _measure_memory(
 
     if device.type == "mps":
         # MPS: weight bytes are exact; add allocation delta for activations.
-        torch.mps.synchronize()  # type: ignore[attr-defined]
-        before = torch.mps.current_allocated_memory()  # type: ignore[attr-defined]
+        torch.mps.synchronize()
+        before = torch.mps.current_allocated_memory()
         with torch.no_grad():
             model(dummy)
-        torch.mps.synchronize()  # type: ignore[attr-defined]
-        after = torch.mps.current_allocated_memory()  # type: ignore[attr-defined]
+        torch.mps.synchronize()
+        after = torch.mps.current_allocated_memory()
         activation_mb = max(0.0, (after - before) / 1e6)
         return weight_mb + activation_mb
 

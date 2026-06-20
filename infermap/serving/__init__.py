@@ -1,10 +1,12 @@
 from __future__ import annotations
+
 from pathlib import Path
+
 from infermap.deployment import DeploymentConfig
-from infermap.serving.triton import TritonGenerator
-from infermap.serving.torchserve import TorchServeGenerator
 from infermap.serving.bentoml import BentoMLGenerator
 from infermap.serving.fastapi import FastAPIGenerator
+from infermap.serving.torchserve import TorchServeGenerator
+from infermap.serving.triton import TritonGenerator
 
 _REGISTRY: dict[str, object] = {
     "triton": TritonGenerator(),

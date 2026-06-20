@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 from pathlib import Path
+
 from infermap.deployment import DeploymentConfig
 from infermap.serving.base import ServingGenerator
 
@@ -63,11 +65,6 @@ class TritonGenerator(ServingGenerator):
         max_batch = config.system.max_safe_batch_size if config.system else config.batch_size
         dynamic = config.system.dynamic_batching if config.system else False
         kind = _instance_kind(config.device)
-
-        dynamic_block = (
-            "\ndynamic_batching {\n  max_queue_delay_microseconds: 100\n}\n"
-            if dynamic else ""
-        )
 
         lines = [
             f'name: "{name}"',

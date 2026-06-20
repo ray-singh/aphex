@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 from pathlib import Path
+
 from infermap.deployment import DeploymentConfig
 from infermap.serving.base import ServingGenerator
 
@@ -59,7 +61,7 @@ class FastAPIGenerator(ServingGenerator):
             "",
             'if __name__ == "__main__":',
             "    import uvicorn",
-            f'    uvicorn.run(app, host="0.0.0.0", port=8080)',
+            '    uvicorn.run(app, host="0.0.0.0", port=8080)',
             "",
         ])
 

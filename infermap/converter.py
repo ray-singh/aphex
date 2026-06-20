@@ -104,7 +104,6 @@ def default_output_path(model_path: Path, backend: str) -> Path:
 
 def _convert_pytorch(model: Any, backend: str, output_path: Path) -> list[Path]:
     import torch
-    import torch.nn as nn
     m = copy.deepcopy(model).cpu().eval()
 
     if backend == "pytorch_fp16":
@@ -207,8 +206,8 @@ def _convert_tensorrt(
     output_path: Path,
     calibration_inputs: list[Any] | None = None,
 ) -> list[Path]:
-    import torch
     import tensorrt as trt
+    import torch
 
     from infermap.benchmark import _make_trt_calibrator
 
@@ -257,8 +256,9 @@ def _convert_openvino(
     calibration_inputs: list[Any] | None = None,
 ) -> list[Path]:
     import io
-    import torch
+
     import openvino as ov
+    import torch
 
     if backend == "openvino_int8" and not calibration_inputs:
         raise RuntimeError(

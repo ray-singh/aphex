@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("infermap.inspector")
 
 ModelFamily = str  # e.g. "transformer", "cnn", "tree_ensemble", "unknown"
 Framework = str   # e.g. "pytorch", "sklearn", "xgboost", "unknown"
@@ -57,7 +60,6 @@ def inspect_model(model_or_path: Any, input_shape: list[int] | None = None) -> M
         model_or_path: A torch.nn.Module instance or path to a saved model file.
         input_shape: Optional input shape for torchinfo summary (without batch dim).
     """
-    import torch
     import torch.nn as nn
 
     if isinstance(model_or_path, (str, Path)):
@@ -125,7 +127,6 @@ def _extract_pytorch_fingerprint(model: Any) -> dict[str, Any]:
 
 def _load_model(path: Path) -> Any:
     import io
-    import pickle
     import zipfile
 
     import torch
@@ -137,8 +138,8 @@ def _load_model(path: Path) -> Any:
     if zipfile.is_zipfile(path):
         try:
             return torch.jit.load(str(path), map_location="cpu")
-        except Exception:
-            pass  # fall through to torch.load for non-script zip saves
+        except Exception as exc:
+            logger.debug("jit.load failed, falling back to torch.load: %s", exc)
 
     # Some pickles store tensors as embedded byte buffers via _load_from_bytes,
     # which bypasses the outer torch.load's map_location (e.g. models saved on CUDA).
@@ -166,7 +167,7 @@ def _load_model(path: Path) -> Any:
     # hold the actual network under a `.net` attribute.  Check this first so that
     # stub nn.Module wrappers don't shadow the real sub-network.
     if hasattr(obj, "net") and isinstance(getattr(obj, "net", None), nn.Module):
-        model = obj.net  # type: ignore[union-attr]
+        model = obj.net
     elif isinstance(obj, nn.Module):
         model = obj
     else:
@@ -202,6 +203,7 @@ class _StubPickle:
             except (ModuleNotFoundError, AttributeError):
                 import sys
                 import types
+
                 import torch.nn as nn
 
                 # Ensure the stub module exists in sys.modules so that
@@ -211,7 +213,7 @@ class _StubPickle:
 
                 stub_mod = sys.modules[module]
                 if hasattr(stub_mod, name):
-                    return getattr(stub_mod, name)  # type: ignore[no-any-return]
+                    return getattr(stub_mod, name)
 
                 _nn_keywords = ("net", "block", "layer", "encoder",
                                 "decoder", "head", "embed", "attention")
@@ -280,25 +282,25 @@ def _patch_stub_forwards(model: Any) -> None:
             def _tcn_block_fwd(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
                 residual = x
                 L = x.shape[2]
-                out = self.conv1(x)[:, :, :L]
-                out = self.relu(out)
+                out = self.conv1(x)[:, :, :L]  # type: ignore[operator]
+                out = self.relu(out)  # type: ignore[operator]
                 if "drop" in self._modules:
-                    out = self.drop(out)
-                out = self.conv2(out)[:, :, :L]
-                out = self.relu(out)
+                    out = self.drop(out)  # type: ignore[operator]
+                out = self.conv2(out)[:, :, :L]  # type: ignore[operator]
+                out = self.relu(out)  # type: ignore[operator]
                 if "drop" in self._modules:
-                    out = self.drop(out)
+                    out = self.drop(out)  # type: ignore[operator]
                 if "downsample" in self._modules:
-                    residual = self.downsample(x)
-                return self.relu(out + residual)
+                    residual = self.downsample(x)  # type: ignore[operator]
+                return self.relu(out + residual)  # type: ignore[operator]
             type(module).forward = _tcn_block_fwd
             continue
 
         # Sequential trunk → last-timestep slice → two parallel heads.
         if "network" in sub_keys and "rv_head_linear" in sub_keys and "shock_head" in sub_keys:
             def _tcn_net_fwd(self: nn.Module, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-                out = self.network(x)[:, :, -1]
-                return self.rv_head_linear(out), self.shock_head(out)
+                out = self.network(x)[:, :, -1]  # type: ignore[operator]
+                return self.rv_head_linear(out), self.shock_head(out)  # type: ignore[operator]
             type(module).forward = _tcn_net_fwd
             continue
 
@@ -307,14 +309,14 @@ def _patch_stub_forwards(model: Any) -> None:
             def _transformer_net_fwd(
                 self: nn.Module, x: torch.Tensor
             ) -> tuple[torch.Tensor, torch.Tensor]:
-                x = self.input_proj(x)
+                x = self.input_proj(x)  # type: ignore[operator]
                 b = x.shape[0]
                 cls = self.cls_token.expand(b, -1, -1)
                 x = torch.cat([cls, x], dim=1)
                 x = x + self.pos_emb.weight[:x.shape[1]].unsqueeze(0)
-                x = self.encoder(x)
+                x = self.encoder(x)  # type: ignore[operator]
                 out = x[:, 0]
-                return self.rv_head_linear(out), self.shock_head(out)
+                return self.rv_head_linear(out), self.shock_head(out)  # type: ignore[operator]
             type(module).forward = _transformer_net_fwd
             continue
 

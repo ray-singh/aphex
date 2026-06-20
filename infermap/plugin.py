@@ -6,10 +6,10 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
+from infermap.benchmark import BenchmarkResult
+from infermap.candidates import DeploymentCandidate
 from infermap.inspector import ModelInfo
 from infermap.profiler import HardwareProfile
-from infermap.candidates import DeploymentCandidate
-from infermap.benchmark import BenchmarkResult
 
 
 class ModelPlugin(ABC):

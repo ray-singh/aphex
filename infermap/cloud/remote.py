@@ -14,11 +14,10 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-
 logger = logging.getLogger("infermap.cloud.remote")
 
 _CLOUD_SCHEMES = ("s3://", "gs://", "az://")
-_REMOTE_BASE = "/tmp"  # constant so the cleanup path is always predictable
+_REMOTE_BASE = "/tmp"  # noqa: S108 — intentional; cleanup guard rejects paths outside /tmp/aphex-*
 
 
 def _is_eval_uri(v: object) -> bool:
@@ -42,7 +41,7 @@ class _RemoteLayout:
         local_model: Path,
         local_eval: Path | str | None,
         want_metrics: bool,
-    ) -> "_RemoteLayout":
+    ) -> _RemoteLayout:
         session = f"aphex-{uuid.uuid4().hex[:8]}"
         directory = f"{_REMOTE_BASE}/{session}"
         if local_eval is None:

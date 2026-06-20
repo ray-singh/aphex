@@ -77,7 +77,6 @@ def prune_model(model: Any, spec: PruneSpec) -> tuple[Any, PruneReport]:
     Operates on every Linear / Conv* layer's ``weight`` parameter. Callers that
     don't want their original model mutated should ``copy.deepcopy`` first.
     """
-    import torch.nn as nn
     import torch.nn.utils.prune as torch_prune
 
     targets = _pruneable_modules(model)
@@ -111,11 +110,12 @@ def _pruneable_modules(model: Any) -> list[Any]:
     out: list[Any] = []
     for mod in model.modules():
         cls_name = type(mod).__name__
-        if cls_name in _PRUNEABLE_TYPES_ATTR and hasattr(mod, "weight"):
-            # Skip layers whose weight isn't a leaf Parameter (e.g. already-quantized
-            # DynamicQuantizedLinear); pruning APIs require a real Parameter.
-            if isinstance(mod, (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d)):
-                out.append(mod)
+        if (
+            cls_name in _PRUNEABLE_TYPES_ATTR
+            and hasattr(mod, "weight")
+            and isinstance(mod, (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d))
+        ):
+            out.append(mod)
     return out
 
 
@@ -146,7 +146,6 @@ def _apply_2_4(module: Any) -> None:
 
 
 def _count_weight_sparsity(modules: list[Any]) -> tuple[int, int]:
-    import torch
 
     total = 0
     zeroed = 0

@@ -5,11 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from infermap.plugin import ModelPlugin
-from infermap.inspector import ModelInfo
-from infermap.profiler import HardwareProfile
-from infermap.candidates import DeploymentCandidate
 from infermap.benchmark import BenchmarkResult
+from infermap.candidates import DeploymentCandidate
+from infermap.inspector import ModelInfo
+from infermap.plugin import ModelPlugin
+from infermap.profiler import HardwareProfile
 
 _PYTORCH_EXTENSIONS = {".pt", ".pth", ".pkl"}
 

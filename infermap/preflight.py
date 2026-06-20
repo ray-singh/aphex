@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 from infermap.inspector import BYTES_PER_PARAM, ModelInfo
@@ -163,7 +163,6 @@ def _suggest_alternatives(
     available_gb: float,
 ) -> list[str]:
     suggestions = []
-    gap = estimated_gb - available_gb
 
     for dtype, bpp in BYTES_PER_PARAM.items():
         if dtype == "fp32":

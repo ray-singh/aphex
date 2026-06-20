@@ -7,11 +7,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from infermap.plugin import ModelPlugin
-from infermap.inspector import ModelInfo
-from infermap.profiler import HardwareProfile
-from infermap.candidates import DeploymentCandidate
 from infermap.benchmark import BenchmarkResult
+from infermap.candidates import DeploymentCandidate
+from infermap.inspector import ModelInfo
+from infermap.plugin import ModelPlugin
+from infermap.profiler import HardwareProfile
 
 _GGUF_MAGIC = b"GGUF"
 
@@ -64,9 +64,7 @@ class LLMPlugin(ModelPlugin):
         if p.is_dir() and (p / "config.json").exists():
             return _config_is_llm(p / "config.json")
         # HuggingFace model ID pattern (org/model) that doesn't exist as a local path
-        if isinstance(path_or_model, str) and "/" in path_or_model and not p.exists():
-            return True
-        return False
+        return isinstance(path_or_model, str) and "/" in path_or_model and not p.exists()
 
     def inspect(self, path_or_model: Any, input_shape: list[int] | None = None) -> ModelInfo:
         p = Path(str(path_or_model))
@@ -227,7 +225,7 @@ def _inspect_hf_config(config_path: Path, model_path: str) -> ModelInfo:
 
 def _inspect_hf_id(model_id: str) -> ModelInfo:
     try:
-        from huggingface_hub import hf_hub_download  # type: ignore[import]
+        from huggingface_hub import hf_hub_download
 
         config_path = Path(hf_hub_download(repo_id=model_id, filename="config.json"))
         return _inspect_hf_config(config_path, model_id)
@@ -379,7 +377,7 @@ def _run_llama_cpp(
     warmup_iters: int,
     measure_iters: int,
 ) -> BenchmarkResult:
-    from llama_cpp import Llama  # type: ignore[import]
+    from llama_cpp import Llama
 
     n_gpu = -1 if candidate.backend == "llama_cpp_gpu" else 0
     llm = Llama(model_path=model_path, n_gpu_layers=n_gpu, verbose=False, n_ctx=2048)
@@ -413,7 +411,7 @@ def _run_vllm(
     measure_iters: int,
 ) -> BenchmarkResult:
     import torch
-    from vllm import LLM, SamplingParams  # type: ignore[import]
+    from vllm import LLM, SamplingParams
 
     dtype = "bfloat16" if "bf16" in candidate.backend else "float16"
     llm = LLM(model=model_path, dtype=dtype)
@@ -443,7 +441,7 @@ def _run_transformers(
     measure_iters: int,
 ) -> BenchmarkResult:
     import torch
-    import transformers  # type: ignore[import]
+    import transformers
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
     model = transformers.AutoModelForCausalLM.from_pretrained(

@@ -14,7 +14,6 @@ from infermap.candidates import DeploymentCandidate
 from infermap.inspector import ModelInfo
 from infermap.profiler import HardwareProfile
 
-
 _DTYPE_BYTES: dict[str, float] = {
     "fp32": 4.0,
     "fp16": 2.0,
