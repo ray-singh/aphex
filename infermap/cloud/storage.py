@@ -89,11 +89,14 @@ class S3Backend(StorageBackend):
             self._s3.upload_fileobj(fh, self._bucket, self._full(key))
 
     def exists(self, key: str) -> bool:
+        from botocore.exceptions import ClientError
         try:
             self._s3.head_object(Bucket=self._bucket, Key=self._full(key))
             return True
-        except Exception:
-            return False
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+                return False
+            raise
 
 
 class GCSBackend(StorageBackend):
@@ -102,13 +105,20 @@ class GCSBackend(StorageBackend):
     def __init__(self, bucket: str, prefix: str) -> None:
         try:
             from google.cloud import storage as gcs
-            self._client = gcs.Client()
-            self._bucket_obj = self._client.bucket(bucket)
         except ImportError:
             raise ImportError(
                 "GCS backend requires google-cloud-storage. "
                 "Install with: pip install google-cloud-storage"
             )
+        try:
+            self._client = gcs.Client()
+        except Exception as exc:
+            raise RuntimeError(
+                "GCS backend: could not initialise client. Ensure Application "
+                "Default Credentials are configured (`gcloud auth application-"
+                "default login` or GOOGLE_APPLICATION_CREDENTIALS)."
+            ) from exc
+        self._bucket_obj = self._client.bucket(bucket)
         self._prefix = prefix.rstrip("/")
 
     def _full(self, key: str) -> str:

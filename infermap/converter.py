@@ -299,16 +299,30 @@ def _convert_openvino(
 # ── deployment.yaml reader ────────────────────────────────────────────────────
 
 
-def read_deployment_yaml(path: Path) -> dict:
+_KNOWN_TOP_LEVEL_SECTIONS = frozenset(
+    {"model", "hardware", "recommendation", "performance",
+     "constraints", "meta", "serving"}
+)
+
+
+def read_deployment_yaml(path: Path, *, strict: bool = False) -> dict:
     """Parse a deployment.yaml written by aphex optimize.
 
     Uses a tiny hand-rolled parser so no third-party yaml library is required.
     Only handles the subset our writer produces: nested dicts of scalar values.
+
+    Validates that the file is structurally a deployment.yaml: the top level
+    must be a mapping that contains at least one of the known sections. If
+    ``strict=True``, unknown top-level keys raise; otherwise a warning is
+    emitted via the logging module and parsing continues.
     """
+    import logging
+    _log = logging.getLogger("infermap.converter")
+
     result: dict = {}
     stack: list[tuple[int, dict]] = [(-1, result)]
 
-    for raw_line in path.read_text().splitlines():
+    for line_no, raw_line in enumerate(path.read_text().splitlines(), 1):
         line = raw_line.rstrip()
         if not line or line.lstrip().startswith("#"):
             continue
@@ -316,7 +330,9 @@ def read_deployment_yaml(path: Path) -> dict:
         content = line.strip()
 
         if ":" not in content:
-            continue
+            raise ValueError(
+                f"{path}:{line_no}: malformed line (no ':' separator): {content!r}"
+            )
 
         key, _, rest = content.partition(":")
         key = key.strip()
@@ -334,6 +350,23 @@ def read_deployment_yaml(path: Path) -> dict:
             stack.append((indent, child))
         else:
             parent[key] = _parse_scalar(rest)
+
+    if not result:
+        raise ValueError(f"{path}: empty or not a YAML mapping")
+
+    known_present = _KNOWN_TOP_LEVEL_SECTIONS & set(result)
+    if not known_present:
+        raise ValueError(
+            f"{path}: does not look like a deployment.yaml written by aphex "
+            f"(no recognised top-level section among "
+            f"{sorted(_KNOWN_TOP_LEVEL_SECTIONS)})"
+        )
+    unknown = set(result) - _KNOWN_TOP_LEVEL_SECTIONS
+    if unknown:
+        msg = f"{path}: unknown top-level section(s): {sorted(unknown)}"
+        if strict:
+            raise ValueError(msg)
+        _log.warning(msg)
 
     return result
 

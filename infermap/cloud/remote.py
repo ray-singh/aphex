@@ -7,17 +7,58 @@ dependencies or credential management needed.
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import sys
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 
+logger = logging.getLogger("infermap.cloud.remote")
+
 _CLOUD_SCHEMES = ("s3://", "gs://", "az://")
+_REMOTE_BASE = "/tmp"  # constant so the cleanup path is always predictable
 
 
 def _is_eval_uri(v: object) -> bool:
     return isinstance(v, str) and any(v.startswith(s) for s in _CLOUD_SCHEMES)
+
+
+@dataclass(frozen=True)
+class _RemoteLayout:
+    """Path mapping for a single remote-optimize session."""
+
+    session: str
+    dir: str
+    model: str
+    output: str
+    metrics: str | None
+    eval: str | None
+
+    @classmethod
+    def for_session(
+        cls,
+        local_model: Path,
+        local_eval: Path | str | None,
+        want_metrics: bool,
+    ) -> "_RemoteLayout":
+        session = f"aphex-{uuid.uuid4().hex[:8]}"
+        directory = f"{_REMOTE_BASE}/{session}"
+        if local_eval is None:
+            remote_eval: str | None = None
+        elif _is_eval_uri(local_eval):
+            remote_eval = str(local_eval)
+        else:
+            remote_eval = f"{directory}/{Path(local_eval).name}"
+        return cls(
+            session=session,
+            dir=directory,
+            model=f"{directory}/{local_model.name}",
+            output=f"{directory}/deployment.yaml",
+            metrics=f"{directory}/metrics.json" if want_metrics else None,
+            eval=remote_eval,
+        )
 
 
 def run_remote_optimize(
@@ -37,55 +78,60 @@ def run_remote_optimize(
        on the remote, streaming output to the local terminal.
     4. Downloads the resulting deployment.yaml to *local_output*.
        If *local_metrics* is given, also downloads the metrics JSON.
-    5. Cleans up the remote temp directory.
+    5. Cleans up the remote temp directory (best-effort, also on failure).
 
     Returns the exit code of the remote aphex command.
     """
-    session = f"aphex-{uuid.uuid4().hex[:8]}"
-    remote_dir = f"/tmp/{session}"
-    remote_model = f"{remote_dir}/{local_model.name}"
-    remote_output = f"{remote_dir}/deployment.yaml"
-    remote_metrics = f"{remote_dir}/metrics.json" if local_metrics is not None else None
-
-    # Cloud URIs are passed through as-is; local paths are uploaded via scp.
-    eval_is_uri = _is_eval_uri(local_eval)
-    if local_eval is None:
-        remote_eval: str | None = None
-    elif eval_is_uri:
-        remote_eval = str(local_eval)
-    else:
-        local_eval = Path(local_eval)  # type: ignore[arg-type]
-        remote_eval = f"{remote_dir}/{local_eval.name}"  # type: ignore[union-attr]
+    layout = _RemoteLayout.for_session(local_model, local_eval, local_metrics is not None)
 
     try:
-        _run(["ssh", host, f"mkdir -p {remote_dir}"])
+        _run(["ssh", host, f"mkdir -p {layout.dir}"])
 
-        _run(["scp", "-q", str(local_model), f"{host}:{remote_model}"])
+        _run(["scp", "-q", str(local_model), f"{host}:{layout.model}"])
 
-        if local_eval is not None and not eval_is_uri:
+        if local_eval is not None and not _is_eval_uri(local_eval):
             local_eval_path = Path(local_eval)
             scp_eval = ["scp", "-q"]
             if local_eval_path.is_dir():
                 scp_eval.append("-r")
-            scp_eval += [str(local_eval_path), f"{host}:{remote_eval}"]
+            scp_eval += [str(local_eval_path), f"{host}:{layout.eval}"]
             _run(scp_eval)
 
         extra_args = list(aphex_args)
-        if remote_eval is not None:
-            extra_args += ["--eval", remote_eval]
+        if layout.eval is not None:
+            extra_args += ["--eval", layout.eval]
 
-        remote_cmd = _build_cmd(remote_model, extra_args, remote_output, remote_metrics)
+        remote_cmd = _build_cmd(layout.model, extra_args, layout.output, layout.metrics)
         exit_code = _stream(["ssh"] + _tty_flag() + [host, remote_cmd])
 
         if exit_code == 0:
-            _run(["scp", "-q", f"{host}:{remote_output}", str(local_output)])
-            if remote_metrics and local_metrics is not None:
-                _run(["scp", "-q", f"{host}:{remote_metrics}", str(local_metrics)], check=False)
+            _run(["scp", "-q", f"{host}:{layout.output}", str(local_output)])
+            if layout.metrics and local_metrics is not None:
+                _run(
+                    ["scp", "-q", f"{host}:{layout.metrics}", str(local_metrics)],
+                    check=False,
+                )
 
         return exit_code
 
     finally:
+        _cleanup_remote(host, layout.dir)
+
+
+def _cleanup_remote(host: str, remote_dir: str) -> None:
+    """Best-effort cleanup of *remote_dir* on *host*.
+
+    Only paths under _REMOTE_BASE are ever removed; anything else is rejected
+    as a defensive guard against an accidentally-modified layout sending an
+    unscoped path to ``rm -rf``.
+    """
+    if not remote_dir.startswith(f"{_REMOTE_BASE}/aphex-"):
+        logger.error("refusing to cleanup unexpected remote dir: %r", remote_dir)
+        return
+    try:
         _run(["ssh", host, f"rm -rf {remote_dir}"], check=False)
+    except Exception as exc:
+        logger.warning("remote cleanup of %s on %s failed: %s", remote_dir, host, exc)
 
 
 def check_remote_aphex(host: str) -> bool:

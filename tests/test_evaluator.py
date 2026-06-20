@@ -478,8 +478,14 @@ def test_fill_accuracy_drop_non_module_skips() -> None:
 
 
 def test_fill_accuracy_drop_pytorch_eval_backends_set() -> None:
-    expected = {"pytorch_fp16", "pytorch_bf16", "pytorch_int8_dynamic",
-                "onnx_int8_cpu", "tensorrt_fp16", "tensorrt_int8", "openvino_int8"}
+    expected = {
+        "pytorch_fp16", "pytorch_bf16", "pytorch_int8_dynamic",
+        "onnx_int8_cpu", "tensorrt_fp16", "tensorrt_int8", "openvino_int8",
+        "pytorch_prune_unstructured_30",
+        "pytorch_prune_unstructured_50",
+        "pytorch_prune_unstructured_70",
+        "pytorch_prune_2_4",
+    }
     assert expected == _PYTORCH_EVAL_BACKENDS
 
 

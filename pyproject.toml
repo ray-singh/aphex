@@ -8,7 +8,7 @@ requires-python = ">=3.12"
 dependencies = [
     "typer>=0.12.0",
     "rich>=13.7.0",
-    "psutil>=5.9.0",
+    "psutil>=6.0.0",
 ]
 
 [project.optional-dependencies]
@@ -58,12 +58,38 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP"]
+select = ["E", "F", "I", "UP", "B", "S", "SIM"]
+ignore = [
+    "E501",   # line length is enforced by formatter
+    "S101",   # assert is fine in tests
+    "S301",   # pickle warnings — opt-in via APHEX_TRUST_PICKLE
+    "S403",   # importing pickle is fine
+    "S404",   # subprocess use is intentional in cloud/remote
+    "S603",   # subprocess call without shell=True; we already construct args as a list
+    "S607",   # ssh/scp via PATH lookup is the correct UX (uses user's SSH config)
+    "B008",   # typer.Option(...) in defaults — required by Typer
+    "B904",   # raise from inside except — many sites are user-facing CLI exits
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S301", "S106"]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
 ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["infermap"]
+omit = ["infermap/serving/**", "tests/**"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

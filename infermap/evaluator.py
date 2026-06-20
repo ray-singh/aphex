@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import contextlib
 import copy as _copy
+import logging
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,11 +21,82 @@ import numpy as np
 
 from infermap.inspector import ModelInfo
 
+logger = logging.getLogger("infermap.evaluator")
+
 _MAX_EVAL_SAMPLES = 512
 _CLOUD_SCHEMES = ("s3://", "gs://", "az://")
 
 _HIGHER_IS_BETTER = frozenset({"accuracy", "f1_macro", "f1_weighted"})
 _LOWER_IS_BETTER = frozenset({"rmse", "mae"})
+
+def _trust_pickle() -> bool:
+    """Allow weights_only=False torch.load only when the user opts in.
+
+    Set APHEX_TRUST_PICKLE=1 to enable pickle-based loading (required for
+    arbitrary nn.Module subclasses, but executes whatever pickled code is
+    in the file). Default is False, which loads only tensors/state_dicts.
+    """
+    return os.environ.get("APHEX_TRUST_PICKLE", "").lower() in ("1", "true", "yes")
+
+
+def _looks_like_pickled_module(exc: BaseException) -> bool:
+    """Heuristic: does this weights_only=True failure look like a pickled object
+    (nn.Module, custom class) vs a corrupt / unsupported file?
+
+    torch raises ``_pickle.UnpicklingError`` / ``WeightsUnpickler`` errors when a
+    .pt file references a non-tensor class under weights_only=True. Detect that
+    family of error so we can guide the user toward state_dict / TRUST_PICKLE
+    rather than print a confusing low-level trace.
+    """
+    msg = str(exc).lower()
+    return (
+        "weightsunpickler" in msg
+        or "unsupported global" in msg
+        or "weights_only" in msg
+        or "globalrestricted" in msg
+        or exc.__class__.__name__ == "UnpicklingError"
+    )
+
+
+def _torch_load(path: Any) -> Any:
+    """Load a torch file with the safest acceptable mode.
+
+    Strategy:
+      1. Try ``weights_only=True`` — works for tensors, state_dicts, dicts of
+         tensors, and typical eval/calibration payloads.
+      2. If that fails *and* the failure looks like a pickled-class issue, fall
+         back to ``weights_only=False`` only when APHEX_TRUST_PICKLE=1 is set,
+         otherwise raise a friendly error with the actionable options.
+      3. If the failure looks unrelated (file corruption, missing module, etc.)
+         re-raise the original exception as-is — the user needs to see it.
+    """
+    import torch
+
+    try:
+        return torch.load(path, weights_only=True)
+    except Exception as safe_exc:
+        if not _looks_like_pickled_module(safe_exc):
+            raise
+        if _trust_pickle():
+            logger.warning(
+                "Loading %s with weights_only=False (APHEX_TRUST_PICKLE=1). "
+                "This executes pickled code; only do this for trusted files.",
+                path,
+            )
+            return torch.load(path, weights_only=False)
+        raise RuntimeError(
+            f"{path!r} contains pickled objects (likely a full nn.Module or a "
+            "custom class) that cannot be loaded under PyTorch's safe "
+            "weights_only=True mode.\n"
+            "Options:\n"
+            "  (a) Re-save as a state_dict / dict of tensors: "
+            "torch.save(model.state_dict(), 'eval.pt')\n"
+            "  (b) Trust the file and set APHEX_TRUST_PICKLE=1 — WARNING: "
+            "pickle execution runs arbitrary code; only do this for files "
+            "you produced or fully trust.\n"
+            f"Underlying error: {safe_exc}"
+        ) from safe_exc
+
 
 METRIC_TASK: dict[str, str] = {
     "accuracy": "classification",
@@ -201,7 +274,7 @@ def load_eval_data(
 def _load_pt(path: Path, max_samples: int, task: str, metric: str) -> EvalDataset:
     import torch
 
-    raw = torch.load(path, weights_only=False)
+    raw = _torch_load(path)
 
     if isinstance(raw, (tuple, list)) and len(raw) == 2:
         X, y = raw
@@ -308,7 +381,8 @@ def _load_image_dir(
                     t = TF.normalize(t, _IMAGENET_MEAN, _IMAGENET_STD)
                 inputs.append(t.unsqueeze(0))
                 labels.append(cls_idx)
-            except Exception:
+            except Exception as exc:
+                logger.debug("Skipping unreadable image %s: %s", f, exc)
                 continue
 
     if not inputs:
@@ -453,7 +527,14 @@ _PYTORCH_EVAL_BACKENDS = frozenset({
     "tensorrt_fp16",   # proxy: evaluate as fp16
     "tensorrt_int8",   # proxy: evaluate as int8_dynamic
     "openvino_int8",   # proxy: evaluate as int8_dynamic
+    "pytorch_prune_unstructured_30",
+    "pytorch_prune_unstructured_50",
+    "pytorch_prune_unstructured_70",
+    "pytorch_prune_2_4",
 })
+
+
+_GENERATIVE_FAMILIES = frozenset({"llm", "transformer_decoder", "seq2seq"})
 
 
 def fill_accuracy_drop(
@@ -466,7 +547,22 @@ def fill_accuracy_drop(
 
     Runs each optimized variant on labelled eval data, computes the task metric
     vs the original model baseline, and writes the relative drop back to the result.
+
+    Skips models whose family is generative (LLM / decoder / seq2seq): a single-pass
+    cosine similarity on logits doesn't approximate perplexity or generation quality,
+    so reporting a number there would actively mislead. Use ``--infer-fn`` plus a
+    user-defined metric in that case.
     """
+    family = (info.family or "").lower()
+    if family in _GENERATIVE_FAMILIES or eval_dataset.task == "generation":
+        logger.warning(
+            "accuracy fill: skipping family=%r because cosine-similarity on a "
+            "single forward pass does not approximate generation quality. "
+            "Pass --infer-fn pointing at a generation+scoring callable to score "
+            "this model.", info.family,
+        )
+        return
+
     framework = (info.framework or "").lower()
     if framework == "pytorch":
         _fill_pytorch(results, model, eval_dataset)
@@ -475,124 +571,188 @@ def fill_accuracy_drop(
 
 
 def _fill_pytorch(results: list, model: Any, eval_dataset: EvalDataset) -> None:
+    """Measure accuracy drop per candidate, sharing a single FP32 deepcopy.
+
+    The model is deep-copied exactly once. Dtype-only variants (fp16/bf16)
+    reuse that copy and restore its FP32 state via the snapshotted state_dict
+    after each measurement; backends that require structural rewrites (int8
+    dynamic, ONNX export+quantize) get a fresh copy because they mutate
+    module classes irreversibly.
+    """
+    import torch
     import torch.nn as nn
 
     if not isinstance(model, nn.Module):
         return
 
     inputs = eval_dataset.inputs
-    baseline_outputs = _run_pytorch_fp32(model, inputs)
+
+    try:
+        base_model = _copy.deepcopy(model).cpu().eval()
+    except Exception as exc:
+        logger.warning("accuracy fill: deepcopy(model) failed: %s", exc)
+        return
+
+    fp32_state = {k: v.detach().clone() for k, v in base_model.state_dict().items()}
+
+    baseline_outputs = _run_in_dtype(base_model, inputs, torch.float32)
     if baseline_outputs is None:
         return
+    base_model.load_state_dict(fp32_state)  # restore in case the run mutated buffers
 
     baseline_score = compute_metric(baseline_outputs, eval_dataset.labels, eval_dataset.metric)
 
     for r in results:
         if not r.ok or r.candidate.backend not in _PYTORCH_EVAL_BACKENDS:
             continue
-        candidate_outputs = _run_pytorch_candidate(r.candidate, model, inputs)
+        try:
+            candidate_outputs = _run_pytorch_candidate(
+                r.candidate, base_model, fp32_state, model, inputs
+            )
+        except Exception as exc:
+            logger.warning(
+                "accuracy fill: backend %s raised %s",
+                r.candidate.backend, exc,
+            )
+            continue
         if candidate_outputs is None:
             continue
         candidate_score = compute_metric(candidate_outputs, eval_dataset.labels, eval_dataset.metric)
         r.accuracy_drop = compute_drop(baseline_score, candidate_score, eval_dataset.metric)
 
 
-def _run_pytorch_fp32(model: Any, inputs: list) -> list | None:
+def _run_in_dtype(model: Any, inputs: list, dtype: Any) -> list | None:
+    """Run model in *dtype* and return per-sample outputs as FP32 numpy arrays.
+
+    Mutates the model in-place via .to(dtype); caller is responsible for
+    restoring state_dict afterwards if FP32 weights are still needed.
+    """
     import torch
 
     try:
-        m = _copy.deepcopy(model).cpu().eval()
+        m = model.to(dtype).eval() if dtype != torch.float32 else model.eval()
         outputs = []
         with torch.no_grad():
             for inp in inputs:
-                x = inp.float().cpu() if isinstance(inp, torch.Tensor) else inp
+                x = inp.float().cpu().to(dtype) if isinstance(inp, torch.Tensor) else inp
                 out = m(x)
-                outputs.append(out.detach().float().cpu().numpy() if isinstance(out, torch.Tensor) else out)
+                outputs.append(
+                    out.detach().float().cpu().numpy()
+                    if isinstance(out, torch.Tensor) else out
+                )
         return outputs
-    except Exception:
+    except Exception as exc:
+        logger.warning("accuracy run failed at dtype=%s: %s", dtype, exc)
         return None
 
 
-def _run_pytorch_candidate(candidate: Any, model: Any, inputs: list) -> list | None:
+def _run_pytorch_candidate(
+    candidate: Any,
+    base_model: Any,
+    fp32_state: dict,
+    original_model: Any,
+    inputs: list,
+) -> list | None:
+    """Compute outputs for a candidate.
+
+    For dtype-only backends we mutate base_model and restore fp32_state after.
+    For structural backends (int8 dynamic, ONNX) we deepcopy `original_model`
+    fresh, since those rewrites can't be reversed by load_state_dict.
+    """
     import torch
 
     from infermap.benchmark import _ensure_quantization_engine, _export_to_onnx_bytes, _safe_quantize_dynamic
 
     backend = candidate.backend
-    try:
-        if backend in ("pytorch_fp16", "tensorrt_fp16"):
-            m = _copy.deepcopy(model).cpu().to(torch.float16).eval()
-            outputs = []
-            with torch.no_grad():
-                for inp in inputs:
-                    x = inp.float().cpu().to(torch.float16) if isinstance(inp, torch.Tensor) else inp
-                    out = m(x)
-                    outputs.append(out.detach().float().cpu().numpy())
-            return outputs
 
-        if backend == "pytorch_bf16":
-            m = _copy.deepcopy(model).cpu().to(torch.bfloat16).eval()
-            outputs = []
-            with torch.no_grad():
-                for inp in inputs:
-                    x = inp.float().cpu().to(torch.bfloat16) if isinstance(inp, torch.Tensor) else inp
-                    out = m(x)
-                    outputs.append(out.detach().float().cpu().numpy())
-            return outputs
+    if backend in ("pytorch_fp16", "tensorrt_fp16"):
+        try:
+            return _run_in_dtype(base_model, inputs, torch.float16)
+        finally:
+            base_model.to(torch.float32)
+            base_model.load_state_dict(fp32_state)
 
-        if backend in ("pytorch_int8_dynamic", "tensorrt_int8", "openvino_int8"):
-            _ensure_quantization_engine()
-            m = _safe_quantize_dynamic(_copy.deepcopy(model).cpu().eval())
-            outputs = []
-            with torch.no_grad():
-                for inp in inputs:
-                    x = inp.float().cpu() if isinstance(inp, torch.Tensor) else inp
-                    out = m(x)
-                    outputs.append(out.detach().cpu().numpy())
-            return outputs
+    if backend == "pytorch_bf16":
+        try:
+            return _run_in_dtype(base_model, inputs, torch.bfloat16)
+        finally:
+            base_model.to(torch.float32)
+            base_model.load_state_dict(fp32_state)
 
-        if backend == "onnx_int8_cpu":
-            import logging
-            import tempfile
-            import warnings
-            from pathlib import Path as _Path
-
-            import onnxruntime as ort
-            from onnxruntime.quantization import QuantType
-            from onnxruntime.quantization import quantize_dynamic as ort_quantize_dynamic
-
-            dummy = inputs[0].float().cpu() if isinstance(inputs[0], torch.Tensor) else inputs[0]
-            onnx_bytes = _export_to_onnx_bytes(_copy.deepcopy(model).cpu().eval(), dummy)
-
-            with tempfile.TemporaryDirectory() as tmpdir:
-                onnx_path = _Path(tmpdir) / "model.onnx"
-                quant_path = _Path(tmpdir) / "model_int8.onnx"
-                onnx_path.write_bytes(onnx_bytes)
-
-                root_logger = logging.getLogger()
-                ort_logger = logging.getLogger("onnxruntime")
-                prev_root, prev_ort = root_logger.level, ort_logger.level
-                root_logger.setLevel(logging.ERROR)
-                ort_logger.setLevel(logging.ERROR)
-                try:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-                        ort_quantize_dynamic(str(onnx_path), str(quant_path), weight_type=QuantType.QInt8)
-                finally:
-                    root_logger.setLevel(prev_root)
-                    ort_logger.setLevel(prev_ort)
-
-                sess = ort.InferenceSession(str(quant_path), providers=["CPUExecutionProvider"])
-
-            outputs = []
+    if backend in ("pytorch_int8_dynamic", "tensorrt_int8", "openvino_int8"):
+        _ensure_quantization_engine()
+        try:
+            m = _safe_quantize_dynamic(_copy.deepcopy(original_model).cpu().eval())
+        except Exception as exc:
+            logger.warning("quantize_dynamic failed: %s", exc)
+            return None
+        outputs = []
+        with torch.no_grad():
             for inp in inputs:
-                x = inp.float().cpu().numpy() if isinstance(inp, torch.Tensor) else inp
-                out = sess.run(None, {"input": x})[0]
-                outputs.append(out)
-            return outputs
+                x = inp.float().cpu() if isinstance(inp, torch.Tensor) else inp
+                out = m(x)
+                outputs.append(out.detach().cpu().numpy())
+        return outputs
 
-    except Exception:
-        return None
+    if backend.startswith("pytorch_prune_"):
+        from infermap.pruning import prune_model, spec_for_backend
+        try:
+            m = _copy.deepcopy(original_model).cpu().eval()
+            m, _report = prune_model(m, spec_for_backend(backend))
+        except Exception as exc:
+            logger.warning("pruning (%s) failed: %s", backend, exc)
+            return None
+        outputs = []
+        with torch.no_grad():
+            for inp in inputs:
+                x = inp.float().cpu() if isinstance(inp, torch.Tensor) else inp
+                out = m(x)
+                outputs.append(out.detach().float().cpu().numpy())
+        return outputs
+
+    if backend == "onnx_int8_cpu":
+        import logging as _logging
+        import tempfile as _tempfile
+        import warnings
+        from pathlib import Path as _Path
+
+        import onnxruntime as ort
+        from onnxruntime.quantization import QuantType
+        from onnxruntime.quantization import quantize_dynamic as ort_quantize_dynamic
+
+        dummy = inputs[0].float().cpu() if isinstance(inputs[0], torch.Tensor) else inputs[0]
+        try:
+            onnx_bytes = _export_to_onnx_bytes(_copy.deepcopy(original_model).cpu().eval(), dummy)
+        except Exception as exc:
+            logger.warning("ONNX export for accuracy eval failed: %s", exc)
+            return None
+
+        with _tempfile.TemporaryDirectory() as tmpdir:
+            onnx_path = _Path(tmpdir) / "model.onnx"
+            quant_path = _Path(tmpdir) / "model_int8.onnx"
+            onnx_path.write_bytes(onnx_bytes)
+
+            root_logger = _logging.getLogger()
+            ort_logger = _logging.getLogger("onnxruntime")
+            prev_root, prev_ort = root_logger.level, ort_logger.level
+            root_logger.setLevel(_logging.ERROR)
+            ort_logger.setLevel(_logging.ERROR)
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    ort_quantize_dynamic(str(onnx_path), str(quant_path), weight_type=QuantType.QInt8)
+            finally:
+                root_logger.setLevel(prev_root)
+                ort_logger.setLevel(prev_ort)
+
+            sess = ort.InferenceSession(str(quant_path), providers=["CPUExecutionProvider"])
+
+        outputs = []
+        for inp in inputs:
+            x = inp.float().cpu().numpy() if isinstance(inp, torch.Tensor) else inp
+            out = sess.run(None, {"input": x})[0]
+            outputs.append(out)
+        return outputs
 
     return None
 
@@ -609,7 +769,8 @@ def _fill_sklearn(results: list, model: Any, eval_dataset: EvalDataset) -> None:
 
     try:
         baseline_raw = predict_fn(X)
-    except Exception:
+    except Exception as exc:
+        logger.warning("sklearn baseline predict failed: %s", exc)
         return
 
     baseline_outputs = _sklearn_raw_to_list(baseline_raw)
@@ -649,7 +810,8 @@ def _run_sklearn_candidate(candidate: Any, model: Any, X: Any) -> Any:
             return predict_fn(X) if predict_fn else None
         if "onnx" in backend:
             return _sklearn_onnx_predict(model, X)
-    except Exception:
+    except Exception as exc:
+        logger.warning("sklearn candidate %s failed: %s", backend, exc)
         return None
     return None
 
@@ -667,7 +829,8 @@ def _sklearn_onnx_predict(model: Any, X: Any) -> Any:
         input_name = sess.get_inputs()[0].name
         out = sess.run(None, {input_name: X.astype(np.float32)})[0]
         return out
-    except Exception:
+    except Exception as exc:
+        logger.warning("sklearn ONNX predict failed: %s", exc)
         return None
 
 

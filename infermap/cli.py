@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 # Must be set before libomp is loaded (i.e. before any torch import).
 # Prevents crash when torch and onnxruntime each ship their own libomp.dylib on macOS.
@@ -132,14 +132,20 @@ def benchmark(
         help="Maximum acceptable quality loss vs original model baseline (0.0–1.0). Requires --calibration-data or --eval.",
     ),
     format_: str = typer.Option("table", "--format", help="Output format: table | json"),
+    jobs: int = typer.Option(
+        1, "--jobs", "-j", min=1,
+        help="Number of (candidate, batch_size) pairs to benchmark in parallel. "
+             "Keep at 1 for accurate latency/memory; raise only on systems with "
+             "many isolated CPU cores and no shared accelerator.",
+    ),
 ) -> None:
     """Benchmark all candidate deployment strategies."""
     from infermap.profiler import profile_hardware
     from infermap.preflight import run_preflight
     from infermap.registry import get_plugin
 
-    shape = [int(x) for x in input_shape.split(",")]
-    bs_list = [int(x) for x in batch_sizes.split(",")]
+    shape = _parse_shape(input_shape)
+    bs_list = _parse_batch_sizes(batch_sizes)
     timeout_s = timeout if timeout > 0 else None
     json_mode = format_ == "json"
 
@@ -148,8 +154,9 @@ def benchmark(
 
     if max_quality_loss is not None and calibration_data is None and eval_data is None:
         err_console.print(
-            "[yellow]Warning: --max-quality-loss has no effect without --calibration-data or --eval.[/yellow]"
+            "--max-quality-loss requires --calibration-data or --eval so a quality score can be measured."
         )
+        raise typer.Exit(code=1)
 
     with console.status("[bold green]Profiling hardware..."):
         hw = profile_hardware()
@@ -173,10 +180,10 @@ def benchmark(
     model = plugin.load(model_path)
     eval_dataset = _load_eval(eval_data, info, eval_label_col)
     fn = _load_infer_fn(infer_fn)
-    calib = _load_calibration(calibration_data, shape) or (eval_dataset.inputs if eval_dataset else None)
+    calib = _resolve_calibration(calibration_data, shape, eval_dataset)
     candidates = plugin.generate_candidates(info, hw)
     candidates, cost_estimates = _prune_with_cost_model(candidates, info, hw, bs_list[0], json_mode)
-    results = _run_candidates(plugin, candidates, model, info, shape, bs_list, warmup, iters, timeout_s, calib, json_mode=json_mode)
+    results = _run_candidates(plugin, candidates, model, info, shape, bs_list, warmup, iters, timeout_s, calib, json_mode=json_mode, jobs=jobs)
     _run_eval(eval_dataset, fn, json_mode, results=results, model=model, info=info)
     if json_mode:
         _emit_json(results)
@@ -254,6 +261,11 @@ def optimize(
     format_: str = typer.Option("table", "--format", help="Output format: table | json"),
     report: Optional[Path] = typer.Option(None, "--report", help="Write HTML benchmark report to this path"),
     metrics: Optional[Path] = typer.Option(None, "--metrics", help="Write benchmark metrics JSON to this path"),
+    jobs: int = typer.Option(
+        1, "--jobs", "-j", min=1,
+        help="Number of (candidate, batch_size) pairs to benchmark in parallel. "
+             "Keep at 1 for accurate latency/memory.",
+    ),
 ) -> None:
     """Benchmark all candidates and recommend the optimal deployment strategy."""
     from infermap.profiler import profile_hardware
@@ -261,8 +273,8 @@ def optimize(
     from infermap.recommender import recommend
     from infermap.registry import get_plugin
 
-    shape = [int(x) for x in input_shape.split(",")]
-    bs_list = [int(x) for x in batch_sizes.split(",")]
+    shape = _parse_shape(input_shape)
+    bs_list = _parse_batch_sizes(batch_sizes)
     timeout_s = timeout if timeout > 0 else None
     json_mode = format_ == "json"
 
@@ -355,10 +367,10 @@ def optimize(
     model = plugin.load(model_path)
     eval_dataset = _load_eval(eval_data, info, eval_label_col, metric_override=metric_override, required=True)
     fn = _load_infer_fn(infer_fn)
-    calib = _load_calibration(calibration_data, shape) or (eval_dataset.inputs if eval_dataset else None)
+    calib = _resolve_calibration(calibration_data, shape, eval_dataset)
     candidates = plugin.generate_candidates(info, hw)
     candidates = _select_with_fingerprint(candidates, info, hw, json_mode)
-    results = _run_candidates(plugin, candidates, model, info, shape, bs_list, 10, 100, timeout_s, calib, json_mode=json_mode)
+    results = _run_candidates(plugin, candidates, model, info, shape, bs_list, 10, 100, timeout_s, calib, json_mode=json_mode, jobs=jobs)
     eval_result = _run_eval(eval_dataset, fn, json_mode, results=results, model=model, info=info)
 
     rec = recommend(
@@ -711,6 +723,167 @@ def check(
 
 
 # ---------------------------------------------------------------------------
+# distill
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def distill(
+    model_path: Path = typer.Argument(..., help="Teacher model path (.pt / .pkl)"),
+    student: str = typer.Option(
+        ..., "--student",
+        help="Student factory as 'path/to/module.py:make_student'. The callable "
+             "must take no arguments and return a torch.nn.Module.",
+    ),
+    eval_data: str = typer.Option(
+        ..., "--eval",
+        help="Labelled dataset for distillation (.pt / .csv / .parquet / image dir / s3:// / gs://).",
+    ),
+    eval_label_col: str = typer.Option("label", "--eval-label-col"),
+    epochs: int = typer.Option(3, "--epochs", min=1),
+    batch_size: int = typer.Option(32, "--batch-size", min=1),
+    lr: float = typer.Option(1e-3, "--lr"),
+    temperature: float = typer.Option(
+        4.0, "--temperature",
+        help="KD softmax temperature. Higher = softer teacher distribution.",
+    ),
+    alpha: float = typer.Option(
+        0.7, "--alpha", min=0.0, max=1.0,
+        help="Weight on KD loss; (1 - alpha) goes to hard-label CE (classification).",
+    ),
+    task: str = typer.Option(
+        "classification", "--task",
+        help="'classification' or 'regression'. Determines the loss formulation.",
+    ),
+    device: str = typer.Option(
+        "cpu", "--device",
+        help="Training device: cpu / cuda / mps.",
+    ),
+    output: Path = typer.Option(
+        Path("student.pt"), "--output",
+        help="Where to write the distilled student state_dict.",
+    ),
+    report_path: Optional[Path] = typer.Option(
+        None, "--report",
+        help="Optional JSON report with losses, parameter counts, and scores.",
+    ),
+) -> None:
+    """Knowledge-distill a teacher model into a smaller student.
+
+    \b
+    Distillation is the only aphex command that performs gradient updates: it
+    trains *student* to match *teacher*'s soft outputs (KL divergence on
+    temperature-scaled logits) plus a hard-label term for classification.
+
+    \b
+    The student is a user-supplied nn.Module — aphex doesn't guess architecture.
+    Provide a factory function and aphex handles the training loop and scoring.
+
+    \b
+    Examples
+    --------
+      aphex distill teacher.pt --student make_student.py:tiny_mlp \\
+            --eval val.pt --epochs 5
+
+      aphex distill resnet50.pt --student make_student.py:resnet18 \\
+            --eval imagenet_subset/ --task classification \\
+            --temperature 3 --alpha 0.8 --device cuda
+    """
+    from infermap.distillation import DistillConfig, distill as _distill_fn, load_student_factory, score
+    from infermap.evaluator import load_eval_data
+    from infermap.registry import get_plugin
+
+    _print_header("distill")
+
+    cfg = DistillConfig(
+        epochs=epochs, batch_size=batch_size, lr=lr,
+        temperature=temperature, alpha=alpha, task=task, device=device,
+    )
+
+    with console.status("[bold green]Loading teacher..."):
+        plugin = get_plugin(model_path)
+        info = plugin.inspect(model_path)
+        teacher = plugin.load(model_path)
+
+    with console.status("[bold green]Building student..."):
+        try:
+            factory = load_student_factory(student)
+            student_model = factory()
+        except Exception as exc:
+            err_console.print(f"Failed to load student factory: {exc}")
+            raise typer.Exit(code=1)
+
+    with console.status("[bold green]Loading eval data..."):
+        eval_dataset = load_eval_data(eval_data, info, label_col=eval_label_col)
+
+    console.print(
+        f"  [dim]teacher params[/dim]  [bold]{sum(p.numel() for p in teacher.parameters()):,}[/bold]"
+    )
+    console.print(
+        f"  [dim]student params[/dim]  [bold]{sum(p.numel() for p in student_model.parameters()):,}[/bold]"
+    )
+    console.print(
+        f"  [dim]epochs={epochs}  batch={batch_size}  lr={lr}  "
+        f"temp={temperature}  alpha={alpha}  task={task}  device={device}[/dim]\n"
+    )
+
+    try:
+        with console.status("[bold green]Distilling..."):
+            distilled, report = _distill_fn(
+                teacher, student_model,
+                eval_dataset.inputs, eval_dataset.labels, cfg,
+            )
+    except Exception as exc:
+        err_console.print(f"Distillation failed: {exc}")
+        raise typer.Exit(code=1)
+
+    try:
+        teacher_score = score(teacher, eval_dataset.inputs, eval_dataset.labels, task, device)
+        student_score = score(distilled, eval_dataset.inputs, eval_dataset.labels, task, device)
+    except Exception as exc:
+        err_console.print(f"[yellow]Warning: scoring failed: {exc}[/yellow]")
+        teacher_score = None
+        student_score = None
+    report.teacher_score = teacher_score
+    report.student_score = student_score
+    report.metric = "accuracy" if task == "classification" else "rmse"
+
+    import torch as _torch
+    _torch.save(distilled.state_dict(), output)
+
+    console.print(Rule("[dim]results[/dim]", style="dim"))
+    console.print(f"  [dim]compression[/dim]  [bold]{report.compression_ratio:.1f}×[/bold]")
+    console.print(
+        f"  [dim]final loss[/dim]   [bold]{report.epoch_losses[-1]:.4f}[/bold]  "
+        f"[dim](first epoch {report.epoch_losses[0]:.4f})[/dim]"
+    )
+    if teacher_score is not None and student_score is not None:
+        console.print(
+            f"  [dim]{report.metric}[/dim]       teacher [bold]{teacher_score:.4f}[/bold]  "
+            f"→  student [bold]{student_score:.4f}[/bold]"
+        )
+    console.print(f"\n  [green]✓[/green]  student state_dict → [bold]{output}[/bold]\n")
+
+    if report_path is not None:
+        payload = {
+            "config": {
+                "epochs": cfg.epochs, "batch_size": cfg.batch_size, "lr": cfg.lr,
+                "temperature": cfg.temperature, "alpha": cfg.alpha,
+                "task": cfg.task, "device": cfg.device,
+            },
+            "teacher_params": report.teacher_params,
+            "student_params": report.student_params,
+            "compression_ratio": report.compression_ratio,
+            "epoch_losses": report.epoch_losses,
+            "metric": report.metric,
+            "teacher_score": report.teacher_score,
+            "student_score": report.student_score,
+        }
+        report_path.write_text(json.dumps(payload, indent=2))
+        console.print(f"  [dim]report →[/dim] [bold]{report_path}[/bold]\n")
+
+
+# ---------------------------------------------------------------------------
 # targets
 # ---------------------------------------------------------------------------
 
@@ -1011,7 +1184,10 @@ def _remote_optimize(
     import tempfile
     tmp_metrics: Path | None = None
     if report is not None and metrics is None:
-        tmp_metrics = Path(tempfile.mktemp(suffix=".json"))
+        # NamedTemporaryFile(delete=False) avoids the mktemp race; we manage
+        # cleanup ourselves in the finally below.
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as fh:
+            tmp_metrics = Path(fh.name)
     local_metrics = metrics or tmp_metrics
 
     # Pass cloud URIs as strings; convert local paths to Path so scp upload works.
@@ -1050,13 +1226,97 @@ _IMAGENET_STD = [0.229, 0.224, 0.225]
 _CALIB_MAX_SAMPLES = 32
 
 
+def _ensure_type(value: object, expected: type, name: str) -> None:
+    """Internal invariant check that raises TypeError (not AssertionError)."""
+    if not isinstance(value, expected):
+        raise TypeError(
+            f"{name} must be {expected.__name__}, got {type(value).__name__}"
+        )
+
+
+def _gate_jobs(jobs: int, candidates: list, json_mode: bool) -> int:
+    """Downgrade --jobs to 1 when any candidate targets a single accelerator.
+
+    Running two benchmarks concurrently on one GPU / MPS device contends for
+    compute and VRAM, distorting latency and memory measurements. We force
+    serial execution in that case and tell the user once.
+    """
+    if jobs <= 1:
+        return jobs
+    accelerator_devices = {
+        getattr(c, "device", "cpu") for c in candidates
+    } - {"cpu", None, ""}
+    if not accelerator_devices:
+        return jobs
+    if not json_mode:
+        err_console.print(
+            f"[yellow]--jobs={jobs} requested but candidates target "
+            f"{sorted(accelerator_devices)}; downgrading to --jobs=1 so latency "
+            "and memory measurements stay accurate. Re-run with --jobs=1 "
+            "explicitly to silence this warning.[/yellow]"
+        )
+    return 1
+
+
+def _parse_shape(s: str) -> list[int]:
+    """Parse a comma-separated input shape, e.g. '3,224,224' → [3,224,224]."""
+    try:
+        parts = [int(x) for x in s.split(",")]
+    except ValueError:
+        err_console.print(
+            f"Invalid --input-shape {s!r}: expected comma-separated positive integers "
+            "like '3,224,224'."
+        )
+        raise typer.Exit(code=1)
+    if not parts or any(p <= 0 for p in parts):
+        err_console.print(
+            f"Invalid --input-shape {s!r}: all dimensions must be positive integers."
+        )
+        raise typer.Exit(code=1)
+    return parts
+
+
+def _parse_batch_sizes(s: str) -> list[int]:
+    try:
+        parts = [int(x) for x in s.split(",")]
+    except ValueError:
+        err_console.print(f"Invalid --batch-sizes {s!r}: expected comma-separated integers.")
+        raise typer.Exit(code=1)
+    if not parts or any(p <= 0 for p in parts):
+        err_console.print(f"Invalid --batch-sizes {s!r}: all batch sizes must be positive.")
+        raise typer.Exit(code=1)
+    return parts
+
+
+def _resolve_calibration(
+    path: Optional[Path], shape: list[int], eval_dataset: object
+) -> list | None:
+    """Return calibration inputs, falling back to eval inputs with a clear warning."""
+    calib = _load_calibration(path, shape)
+    if calib is not None:
+        return calib
+    if eval_dataset is None:
+        return None
+    eval_inputs = getattr(eval_dataset, "inputs", None)
+    if not eval_inputs:
+        return None
+    err_console.print(
+        "[yellow]Note: no --calibration-data supplied; using eval inputs for int8 "
+        "calibration. This can leak the eval set into quantization (the calibrated "
+        "model is then scored on the same data). Pass --calibration-data for a clean "
+        "split.[/yellow]"
+    )
+    return eval_inputs[:_CALIB_MAX_SAMPLES]
+
+
 def _load_calibration(path: Optional[Path], input_shape: list[int]) -> list | None:
     if path is None:
         return None
     if path.is_dir():
         return _load_calibration_dir(path, input_shape)
+    from infermap.evaluator import _torch_load
     import torch
-    raw = torch.load(path, weights_only=False)
+    raw = _torch_load(path)
     if isinstance(raw, torch.Tensor):
         return [raw[i : i + 1] for i in range(min(raw.size(0), _CALIB_MAX_SAMPLES))]
     if isinstance(raw, list):
@@ -1110,7 +1370,8 @@ def _load_eval(
         return None
     from infermap.evaluator import load_eval_data
     from infermap.inspector import ModelInfo
-    assert isinstance(info, ModelInfo)
+    if not isinstance(info, ModelInfo):
+        raise TypeError(f"_load_eval expected ModelInfo, got {type(info).__name__}")
     try:
         return load_eval_data(path, info, label_col=label_col, metric_override=metric_override)
     except ValueError as exc:
@@ -1148,7 +1409,10 @@ def _run_eval(
     from infermap.evaluator import EvalDataset
     if eval_dataset is None:
         return None
-    assert isinstance(eval_dataset, EvalDataset)
+    if not isinstance(eval_dataset, EvalDataset):
+        raise TypeError(
+            f"_run_eval expected EvalDataset, got {type(eval_dataset).__name__}"
+        )
 
     if infer_fn is not None:
         from infermap.evaluator import evaluate_baseline
@@ -1189,8 +1453,8 @@ def _select_with_fingerprint(
     from infermap.profiler import HardwareProfile
     from infermap.selector import select_candidates
 
-    assert isinstance(info, ModelInfo)
-    assert isinstance(hw, HardwareProfile)
+    _ensure_type(info, ModelInfo, "info")
+    _ensure_type(hw, HardwareProfile, "hw")
 
     selected, rationale = select_candidates(candidates, info, hw, k=4)
     if not json_mode:
@@ -1209,8 +1473,8 @@ def _prune_with_cost_model(
     from infermap.inspector import ModelInfo
     from infermap.profiler import HardwareProfile
 
-    assert isinstance(info, ModelInfo)
-    assert isinstance(hw, HardwareProfile)
+    _ensure_type(info, ModelInfo, "info")
+    _ensure_type(hw, HardwareProfile, "hw")
 
     kept, estimates = prune_candidates(candidates, info, hw, batch_size=batch_size)
     pruned = len(candidates) - len(kept)
@@ -1234,22 +1498,25 @@ def _run_candidates(
     timeout_s: float | None,
     calibration_inputs: list | None = None,
     json_mode: bool = False,
+    jobs: int = 1,
 ) -> list:
     from infermap.plugin import ModelPlugin
-    assert isinstance(plugin, ModelPlugin)
+    _ensure_type(plugin, ModelPlugin, "plugin")
 
-    results = []
-    total = len(candidates) * len(batch_sizes)
+    jobs = _gate_jobs(jobs, candidates, json_mode)
+
+    pairs: list[tuple[object, int]] = [(c, bs) for c in candidates for bs in batch_sizes]
+    total = len(pairs)
+
+    def _bench(pair: tuple[object, int]) -> object:
+        cand, bs = pair
+        return plugin.benchmark(  # type: ignore[arg-type]
+            cand, model, model_info, shape, bs, warmup, iters,
+            timeout_s, calibration_inputs,
+        )
 
     if json_mode:
-        for cand in candidates:
-            for bs in batch_sizes:
-                r = plugin.benchmark(  # type: ignore[arg-type]
-                    cand, model, model_info, shape, bs, warmup, iters,
-                    timeout_s, calibration_inputs,
-                )
-                results.append(r)
-        return results
+        return _run_pairs_parallel(pairs, _bench, jobs) if jobs > 1 else [_bench(p) for p in pairs]
 
     console.print()
 
@@ -1262,34 +1529,58 @@ def _run_candidates(
         TimeElapsedColumn(),
         console=console,
     ) as progress:
-        task = progress.add_task(
-            f"racing {len(candidates)} backends × {len(batch_sizes)} batch sizes",
+        task_id = progress.add_task(
+            f"racing {len(candidates)} backends × {len(batch_sizes)} batch sizes"
+            + (f"  [dim](jobs={jobs})[/dim]" if jobs > 1 else ""),
             total=total,
         )
-        for cand in candidates:
-            for bs in batch_sizes:
-                progress.update(task, description=f"{cand.description}  bs={bs}")
-                r = plugin.benchmark(  # type: ignore[arg-type]
-                    cand, model, model_info, shape, bs, warmup, iters,
-                    timeout_s, calibration_inputs,
+
+        def _print_result(cand: object, bs: int, r: Any) -> None:
+            if r.ok:
+                progress.console.print(
+                    f"  [green]✓[/green]  {cand.description:<44}"  # type: ignore[attr-defined]
+                    f"  [dim]bs={bs:<3}[/dim]"
+                    f"  [bold]{r.latency_p50_ms:>8.2f} ms[/bold]"
+                    f"  [dim]{r.throughput_rps:>7.0f} req/s[/dim]"
                 )
+            else:
+                progress.console.print(
+                    f"  [red]✗[/red]  [dim]{cand.description:<44}  bs={bs}[/dim]"  # type: ignore[attr-defined]
+                    f"  [red]{(r.error or '')[:55]}[/red]"
+                )
+
+        if jobs <= 1:
+            results = []
+            for cand, bs in pairs:
+                progress.update(task_id, description=f"{cand.description}  bs={bs}")  # type: ignore[attr-defined]
+                r = _bench((cand, bs))
                 results.append(r)
-                if r.ok:
-                    progress.console.print(
-                        f"  [green]✓[/green]  {cand.description:<44}"
-                        f"  [dim]bs={bs:<3}[/dim]"
-                        f"  [bold]{r.latency_p50_ms:>8.2f} ms[/bold]"
-                        f"  [dim]{r.throughput_rps:>7.0f} req/s[/dim]"
-                    )
-                else:
-                    progress.console.print(
-                        f"  [red]✗[/red]  [dim]{cand.description:<44}  bs={bs}[/dim]"
-                        f"  [red]{(r.error or '')[:55]}[/red]"
-                    )
-                progress.advance(task)
+                _print_result(cand, bs, r)
+                progress.advance(task_id)
+        else:
+            results = []
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=jobs) as ex:
+                futures = {ex.submit(_bench, p): p for p in pairs}
+                for fut in as_completed(futures):
+                    cand, bs = futures[fut]
+                    r = fut.result()
+                    results.append(r)
+                    _print_result(cand, bs, r)
+                    progress.advance(task_id)
 
     console.print()
     return results
+
+
+def _run_pairs_parallel(
+    pairs: list[tuple[object, int]],
+    bench_fn: "Callable[[tuple[object, int]], object]",
+    jobs: int,
+) -> list:
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=jobs) as ex:
+        return list(ex.map(bench_fn, pairs))
 
 
 # ---------------------------------------------------------------------------
@@ -1299,7 +1590,7 @@ def _run_candidates(
 
 def _result_to_dict(r: object) -> dict:
     from infermap.benchmark import BenchmarkResult
-    assert isinstance(r, BenchmarkResult)
+    _ensure_type(r, BenchmarkResult, "result")
     return {
         "backend": r.candidate.backend,
         "dtype": r.candidate.dtype,
@@ -1321,7 +1612,7 @@ def _build_metrics_payload(results: list, recommendation: object = None) -> dict
     payload: dict = {"results": [_result_to_dict(r) for r in results]}
     if recommendation is not None:
         from infermap.recommender import Recommendation
-        assert isinstance(recommendation, Recommendation)
+        _ensure_type(recommendation, Recommendation, "recommendation")
         r = recommendation.result
         payload["recommendation"] = {
             **_result_to_dict(r),

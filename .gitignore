@@ -230,3 +230,6 @@ eval_data.pt
 infer.py
 *.engine
 *.onnx
+resnet18.pt
+*.pth
+deployment.yaml

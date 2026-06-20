@@ -124,7 +124,41 @@ def _cuda_candidates(hardware: HardwareProfile) -> list[DeploymentCandidate]:
         ),
     ]
 
+    candidates += _prune_candidates("cuda")
+    candidates += _data_parallel_candidates(hardware)
     return candidates
+
+
+def _data_parallel_candidates(hardware: HardwareProfile) -> list[DeploymentCandidate]:
+    """Single-process nn.DataParallel candidates, one per supported dtype × world size.
+
+    Only emitted when the host actually has >=2 CUDA devices. DP shards the batch
+    dimension across GPUs, so it's a throughput win at large batch and a latency
+    no-op (or slight loss) at batch=1 — the runner enforces ``batch_size >= N``.
+    """
+    n = hardware.accelerator.device_count
+    if hardware.accelerator.kind != "cuda" or n < 2:
+        return []
+    world_sizes = [w for w in (2, 4, 8) if w <= n]
+    dtypes: list[tuple[str, str]] = [("fp32", "FP32"), ("fp16", "FP16")]
+    if hardware.accelerator.bf16:
+        dtypes.append(("bf16", "BF16"))
+    out: list[DeploymentCandidate] = []
+    for world in world_sizes:
+        for dtype, dtype_label in dtypes:
+            out.append(
+                DeploymentCandidate(
+                    backend=f"pytorch_dp{world}_{dtype}",
+                    dtype=dtype,
+                    description=(
+                        f"PyTorch {dtype_label} on {world}× GPU via nn.DataParallel "
+                        f"(throughput-oriented; requires batch >= {world})"
+                    ),
+                    requires_export=False,
+                    device="cuda",
+                )
+            )
+    return out
 
 
 def _mps_candidates(hardware: HardwareProfile) -> list[DeploymentCandidate]:
@@ -186,7 +220,48 @@ def _mps_candidates(hardware: HardwareProfile) -> list[DeploymentCandidate]:
             device="cpu",
         ),
     ]
+    candidates += _prune_candidates("cpu")
     return candidates
+
+
+def _prune_candidates(device: str) -> list[DeploymentCandidate]:
+    """Magnitude-pruned PyTorch candidates available on any device.
+
+    2:4 structured pruning is only meaningful as a latency win on CUDA Ampere+
+    (sm_80+ sparse Tensor Cores). On other devices it still produces a valid
+    50%-sparse model — useful as a storage / accuracy reference — but with no
+    speedup expected.
+    """
+    return [
+        DeploymentCandidate(
+            backend="pytorch_prune_unstructured_30",
+            dtype="fp32",
+            description="PyTorch FP32 + 30% magnitude prune",
+            requires_export=False,
+            device=device,
+        ),
+        DeploymentCandidate(
+            backend="pytorch_prune_unstructured_50",
+            dtype="fp32",
+            description="PyTorch FP32 + 50% magnitude prune",
+            requires_export=False,
+            device=device,
+        ),
+        DeploymentCandidate(
+            backend="pytorch_prune_unstructured_70",
+            dtype="fp32",
+            description="PyTorch FP32 + 70% magnitude prune",
+            requires_export=False,
+            device=device,
+        ),
+        DeploymentCandidate(
+            backend="pytorch_prune_2_4",
+            dtype="fp32",
+            description="PyTorch FP32 + 2:4 structured prune",
+            requires_export=False,
+            device=device,
+        ),
+    ]
 
 
 def _cpu_candidates() -> list[DeploymentCandidate]:
@@ -240,4 +315,5 @@ def _cpu_candidates() -> list[DeploymentCandidate]:
             requires_export=True,
             device="cpu",
         ),
+        *_prune_candidates("cpu"),
     ]

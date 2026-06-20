@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import gc
+import logging
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from infermap.candidates import DeploymentCandidate
 from infermap.inspector import ModelInfo
+
+if TYPE_CHECKING:
+    import torch
+    from torch import nn
+
+logger = logging.getLogger("infermap.benchmark")
 
 _WARMUP_ITERS = 10
 _MEASURE_ITERS = 100
@@ -19,6 +26,10 @@ _ACCURACY_SENSITIVE_BACKENDS = {
     "tensorrt_fp16",
     "tensorrt_int8",
     "openvino_int8",
+    "pytorch_prune_unstructured_30",
+    "pytorch_prune_unstructured_50",
+    "pytorch_prune_unstructured_70",
+    "pytorch_prune_2_4",
 }
 # Backends that require an eager nn.Module (not a ScriptModule): compile needs the
 # graph to be traceable by dynamo, and quantize_dynamic rewrites Linear submodules.
@@ -34,6 +45,39 @@ _TRT_OV_BACKENDS = frozenset({
     "tensorrt_fp32", "tensorrt_fp16", "tensorrt_int8",
     "openvino_fp32", "openvino_int8",
 })
+
+# Families where a single-pass cosine similarity proxy is not a meaningful
+# accuracy signal. Listed here (rather than imported from evaluator) to avoid
+# importing the larger evaluator module from the benchmark hot path.
+_GENERATIVE_FAMILIES = frozenset({"llm", "transformer_decoder", "seq2seq"})
+
+
+def _is_generative_family(info: ModelInfo | None) -> bool:
+    if info is None:
+        return False
+    return (info.family or "").lower() in _GENERATIVE_FAMILIES
+
+
+def _is_pruning_backend(backend: str) -> bool:
+    """Local check to avoid importing infermap.pruning at module-load time."""
+    return backend.startswith("pytorch_prune_")
+
+
+def _is_dp_backend(backend: str) -> bool:
+    """True for ``pytorch_dp{N}_{dtype}`` candidates."""
+    return backend.startswith("pytorch_dp")
+
+
+def _dp_world_size(backend: str) -> int:
+    """Parse N from ``pytorch_dp{N}_{dtype}``. Raises ValueError on malformed names."""
+    rest = backend[len("pytorch_dp"):]
+    digits = rest.split("_", 1)[0]
+    if not digits.isdigit():
+        raise ValueError(f"malformed DP backend: {backend!r}")
+    n = int(digits)
+    if n < 2:
+        raise ValueError(f"DP world size must be >= 2 in {backend!r}")
+    return n
 
 
 def _require_torch() -> None:
@@ -63,16 +107,28 @@ def _ensure_quantization_engine() -> None:
 
 
 def _safe_quantize_dynamic(model: Any) -> Any:
-    """Quantize all nn.Linear modules, then patch DynamicQuantizedLinear.weight
-    to be a property so models that access .weight directly (e.g. Swin-T) still work.
+    """Quantize all nn.Linear modules.
+
+    On PyTorch versions where DynamicQuantizedLinear lacks a usable ``.weight``
+    accessor, we substitute a subclass that exposes ``.weight`` and ``.bias`` as
+    dequantized-tensor properties so models that introspect ``.weight`` directly
+    (e.g. Swin-T) still work. On versions that already provide a working
+    accessor, the patch is skipped.
     """
     import warnings
     import torch
     import torch.nn as nn
 
-    class _CompatDynamicLinear(torch.ao.nn.quantized.dynamic.Linear):
-        """DynamicQuantizedLinear with .weight and .bias as dequantized-tensor properties."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        qm = torch.ao.quantization.quantize_dynamic(model, {nn.Linear}, dtype=torch.qint8)
 
+    base_cls = torch.ao.nn.quantized.dynamic.Linear
+
+    if _dyn_quant_linear_has_weight(base_cls):
+        return qm
+
+    class _CompatDynamicLinear(base_cls):  # type: ignore[misc, valid-type]
         @property  # type: ignore[override]
         def weight(self) -> torch.Tensor:
             return torch.dequantize(self._packed_params._weight_bias()[0])
@@ -81,16 +137,23 @@ def _safe_quantize_dynamic(model: Any) -> Any:
         def bias(self) -> torch.Tensor | None:
             return self._packed_params._weight_bias()[1]
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        qm = torch.ao.quantization.quantize_dynamic(model, {nn.Linear}, dtype=torch.qint8)
-
-    base_cls = torch.ao.nn.quantized.dynamic.Linear
     for mod in qm.modules():
         if type(mod) is base_cls:
             mod.__class__ = _CompatDynamicLinear
 
     return qm
+
+
+def _dyn_quant_linear_has_weight(cls: Any) -> bool:
+    """Whether the given DynamicQuantizedLinear class already exposes .weight()."""
+    try:
+        instance_attr = cls.__dict__.get("weight")
+        if isinstance(instance_attr, property):
+            return True
+        # Some PyTorch versions provide weight() as a method.
+        return callable(getattr(cls, "weight", None))
+    except Exception:
+        return False
 
 
 @dataclass
@@ -228,8 +291,8 @@ def _serialize_model(
             buf = io.BytesIO()
             torch.jit.save(traced, buf)
             return ("script", buf.getvalue())
-        except Exception:
-            pass  # fall through to regular pickle path
+        except Exception as exc:
+            logger.debug("torch.jit.trace failed (%s); falling back to torch.save", exc)
 
     buf = io.BytesIO()
     torch.save(model, buf)
@@ -269,6 +332,10 @@ def _deserialize_model(model_payload: tuple[Any, ...]) -> Any:
     if kind == "script":
         return torch.jit.load(buf)
 
+    # weights_only=False is required here because the parent process pickled
+    # an nn.Module (not a state_dict) into this buffer. The buffer originates
+    # from our own _serialize_model, not from disk, so there's no untrusted
+    # input — it travels parent → subprocess via mp.Queue.
     if kind == "stub_module":
         _recreate_stubs(model_payload[2])
         model = torch.load(buf, weights_only=False)
@@ -422,8 +489,23 @@ def _run_benchmark(
     device = torch.device(candidate.device)
 
     accuracy_drop: float | None = None
-    if calibration_inputs and candidate.backend in _ACCURACY_SENSITIVE_BACKENDS:
+    if (
+        calibration_inputs
+        and candidate.backend in _ACCURACY_SENSITIVE_BACKENDS
+        and not _is_generative_family(model_info)
+    ):
         accuracy_drop = _measure_accuracy_drop(candidate, model, calibration_inputs)
+    elif (
+        calibration_inputs
+        and candidate.backend in _ACCURACY_SENSITIVE_BACKENDS
+        and _is_generative_family(model_info)
+    ):
+        logger.warning(
+            "skipping cosine-similarity accuracy proxy for family=%r: "
+            "single-forward cosine doesn't approximate generation quality. "
+            "Use --infer-fn with a perplexity or task-metric callable.",
+            getattr(model_info, "family", None),
+        )
 
     prepared_model, dummy_input, weight_mb = _prepare(candidate, model, input_shape, batch_size, device, calibration_inputs)
 
@@ -531,6 +613,36 @@ def _prepare(
         _ensure_quantization_engine()
         m = _safe_quantize_dynamic(m)
         weight_mb = weight_mb / 4  # linear weights stored as INT8, ~4x smaller than FP32
+    elif _is_dp_backend(candidate.backend):
+        if device.type != "cuda":
+            raise RuntimeError(
+                f"{candidate.backend!r} requires a CUDA device, got {device.type!r}."
+            )
+        world = _dp_world_size(candidate.backend)
+        available = torch.cuda.device_count()
+        if available < world:
+            raise RuntimeError(
+                f"{candidate.backend!r} needs {world} CUDA devices, found {available}."
+            )
+        if batch_size < world:
+            raise RuntimeError(
+                f"{candidate.backend!r} requires batch_size >= {world} so DP can "
+                f"shard the batch dim; got batch_size={batch_size}."
+            )
+        m = torch.nn.DataParallel(m, device_ids=list(range(world)))
+    elif _is_pruning_backend(candidate.backend):
+        if isinstance(m, torch.jit.ScriptModule):
+            raise RuntimeError(
+                "Pruning requires an eager nn.Module so layer weights can be "
+                "modified in place. Save a non-scripted model and rerun."
+            )
+        from infermap.pruning import prune_model, spec_for_backend
+        m, report = prune_model(m, spec_for_backend(candidate.backend))
+        if report.weight_params_total > 0:
+            # Approximate the post-pruning storage: zeros still take space in
+            # dense tensors. (1 - sparsity) is the conservative compressed-form
+            # estimate that a sparse storage format could reach.
+            weight_mb = weight_mb * max(0.05, 1.0 - report.sparsity)
     elif candidate.backend in ("onnx_cpu", "onnx_cuda", "onnx_coreml"):
         m, dummy = _prepare_onnx(candidate, m, dummy, device)
     elif candidate.backend == "onnx_int8_cpu":
@@ -791,7 +903,8 @@ def _measure_accuracy_drop(
                     for inp in calibration_inputs:
                         out = half_model(inp.float().cpu().to(torch_dtype))
                         quant_outs.append(out.detach().flatten().float())
-            except Exception:
+            except Exception as exc:
+                logger.info("accuracy proxy (%s) failed: %s", candidate.backend, exc)
                 return None
 
         elif candidate.backend == "tensorrt_fp16":
@@ -802,7 +915,8 @@ def _measure_accuracy_drop(
                     for inp in calibration_inputs:
                         out = half_model(inp.float().cpu().to(torch.float16))
                         quant_outs.append(out.detach().flatten().float())
-            except Exception:
+            except Exception as exc:
+                logger.info("tensorrt_fp16 accuracy proxy failed: %s", exc)
                 return None
 
         elif candidate.backend in ("tensorrt_int8", "openvino_int8"):
@@ -813,6 +927,19 @@ def _measure_accuracy_drop(
                 for inp in calibration_inputs:
                     out = quant_model(inp.float().cpu())
                     quant_outs.append(out.detach().flatten().float())
+
+        elif _is_pruning_backend(candidate.backend):
+            from infermap.pruning import prune_model, spec_for_backend
+            try:
+                pruned = copy.deepcopy(model).cpu().eval()
+                pruned, _report = prune_model(pruned, spec_for_backend(candidate.backend))
+                with torch.no_grad():
+                    for inp in calibration_inputs:
+                        out = pruned(inp.float().cpu())
+                        quant_outs.append(out.detach().flatten().float())
+            except Exception as exc:
+                logger.info("pruning accuracy proxy (%s) failed: %s", candidate.backend, exc)
+                return None
 
         if not quant_outs:
             return None
@@ -826,7 +953,8 @@ def _measure_accuracy_drop(
 
         return sum(drops) / len(drops) if drops else None
 
-    except Exception:
+    except Exception as exc:
+        logger.warning("accuracy-drop measurement failed for %s: %s", candidate.backend, exc)
         return None
 
 

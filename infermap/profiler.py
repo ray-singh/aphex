@@ -24,6 +24,7 @@ class AcceleratorProfile:
     bf16: bool
     # CUDA-only fields
     cuda_compute: str = ""
+    device_count: int = 1
     # Hardware capability fingerprint (V3) — None when unknown
     memory_bandwidth_gbps: float | None = None
     fp16_tflops: float | None = None
@@ -178,6 +179,7 @@ def _profile_cuda(torch: object) -> AcceleratorProfile:
         memory_gb=memory_gb,
         bf16=bf16,
         cuda_compute=compute,
+        device_count=t.cuda.device_count(),
         memory_bandwidth_gbps=bw,
         fp16_tflops=fp16,
         int8_tops=int8,
