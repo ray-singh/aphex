@@ -114,9 +114,9 @@ def benchmark(
         None, "--calibration-data",
         help="Path to a .pt file (or image directory) with unlabelled calibration inputs for int8 quantization.",
     ),
-    eval_data: Optional[Path] = typer.Option(
+    eval_data: Optional[str] = typer.Option(
         None, "--eval",
-        help="Path to labelled eval data (.pt, .parquet, .csv, or image dir) for real accuracy measurement.",
+        help="Path to labelled eval data (.pt, .parquet, .csv, or image dir), or a cloud URI (s3://, gs://). For real accuracy measurement.",
     ),
     eval_label_col: str = typer.Option(
         "label", "--eval-label-col",
@@ -214,9 +214,9 @@ def optimize(
         None, "--calibration-data",
         help="Path to a .pt file (or image directory) with unlabelled calibration inputs for int8 quantization.",
     ),
-    eval_data: Optional[Path] = typer.Option(
+    eval_data: Optional[str] = typer.Option(
         None, "--eval",
-        help="Path to labelled eval data (.pt, .parquet, .csv, or image dir). Required for quality measurement.",
+        help="Path to labelled eval data (.pt, .parquet, .csv, or image dir), or a cloud URI (s3://, gs://). Required for quality measurement.",
     ),
     eval_label_col: str = typer.Option(
         "label", "--eval-label-col",
@@ -580,7 +580,7 @@ def check(
     ),
     warmup: int = typer.Option(5, help="Warm-up iterations (default lower than optimize for speed)"),
     iters: int = typer.Option(50, help="Measurement iterations"),
-    eval_data: Optional[Path] = typer.Option(None, "--eval", help="Labelled eval data for accuracy re-check"),
+    eval_data: Optional[str] = typer.Option(None, "--eval", help="Labelled eval data for accuracy re-check (path or cloud URI)"),
     eval_label_col: str = typer.Option("label", "--eval-label-col"),
     infer_fn: Optional[str] = typer.Option(None, "--infer-fn", help="Inference callable 'module.py:fn'"),
 ) -> None:
@@ -939,7 +939,7 @@ def _remote_optimize(
     format_: str,
     target: Optional[str],
     calibration_data: Optional[Path],
-    eval_data: Optional[Path],
+    eval_data: Optional[str],
     infer_fn: Optional[str],
     report: Optional[Path] = None,
     metrics: Optional[Path] = None,
@@ -1014,8 +1014,14 @@ def _remote_optimize(
         tmp_metrics = Path(tempfile.mktemp(suffix=".json"))
     local_metrics = metrics or tmp_metrics
 
+    # Pass cloud URIs as strings; convert local paths to Path so scp upload works.
+    from infermap.cloud.remote import _is_eval_uri
+    eval_remote_arg: Path | str | None = (
+        eval_data if (eval_data is None or _is_eval_uri(eval_data)) else Path(eval_data)
+    )
+
     try:
-        exit_code = run_remote_optimize(host, model_path, args, local_output, local_metrics, eval_data)
+        exit_code = run_remote_optimize(host, model_path, args, local_output, local_metrics, eval_remote_arg)
         if exit_code != 0:
             raise typer.Exit(code=exit_code)
 
@@ -1094,7 +1100,7 @@ def _load_calibration_dir(path: Path, input_shape: list[int]) -> list | None:
 
 
 def _load_eval(
-    path: Optional[Path],
+    path: Optional[str],
     info: object,
     label_col: str,
     metric_override: Optional[str] = None,

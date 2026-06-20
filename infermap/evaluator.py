@@ -7,16 +7,20 @@ and computes a task-appropriate metric. No auto-detection of model internals.
 
 from __future__ import annotations
 
+import contextlib
 import copy as _copy
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import numpy as np
 
 from infermap.inspector import ModelInfo
 
 _MAX_EVAL_SAMPLES = 512
+_CLOUD_SCHEMES = ("s3://", "gs://", "az://")
 
 _HIGHER_IS_BETTER = frozenset({"accuracy", "f1_macro", "f1_weighted"})
 _LOWER_IS_BETTER = frozenset({"rmse", "mae"})
@@ -28,6 +32,83 @@ METRIC_TASK: dict[str, str] = {
     "rmse": "regression",
     "mae": "regression",
 }
+
+
+def _is_cloud_uri(path: str) -> bool:
+    return isinstance(path, str) and any(path.startswith(s) for s in _CLOUD_SCHEMES)
+
+
+def _download_cloud_uri(uri: str, tmp_dir: Path) -> Path:
+    """Download a cloud eval URI (file or prefix) into tmp_dir; return the local path."""
+    if uri.startswith("s3://"):
+        return _download_s3_eval(uri, tmp_dir)
+    if uri.startswith("gs://"):
+        return _download_gcs_eval(uri, tmp_dir)
+    raise ValueError(
+        f"Unsupported cloud URI {uri!r}. Supported schemes: s3://, gs://"
+    )
+
+
+def _download_s3_eval(uri: str, tmp_dir: Path) -> Path:
+    try:
+        import boto3
+    except ImportError:
+        raise ImportError("S3 eval data requires boto3: pip install boto3")
+
+    parsed = urlparse(uri)
+    bucket, key = parsed.netloc, parsed.path.lstrip("/")
+    s3 = boto3.client("s3")
+
+    # Single file: has an extension and doesn't end with "/"
+    if not key.endswith("/") and "." in Path(key).name:
+        dest = tmp_dir / Path(key).name
+        s3.download_file(bucket, key, str(dest))
+        return dest
+
+    # Directory prefix: list and download all objects
+    prefix = key.rstrip("/") + "/"
+    local_root = tmp_dir / Path(key.rstrip("/")).name
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            relative = obj["Key"][len(prefix):]
+            if not relative:
+                continue
+            dest = local_root / relative
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            s3.download_file(bucket, obj["Key"], str(dest))
+    return local_root
+
+
+def _download_gcs_eval(uri: str, tmp_dir: Path) -> Path:
+    try:
+        from google.cloud import storage as gcs
+    except ImportError:
+        raise ImportError(
+            "GCS eval data requires google-cloud-storage: "
+            "pip install google-cloud-storage"
+        )
+
+    parsed = urlparse(uri)
+    bucket_name, obj_path = parsed.netloc, parsed.path.lstrip("/")
+    client = gcs.Client()
+    bucket = client.bucket(bucket_name)
+
+    if not obj_path.endswith("/") and "." in Path(obj_path).name:
+        dest = tmp_dir / Path(obj_path).name
+        bucket.blob(obj_path).download_to_filename(str(dest))
+        return dest
+
+    prefix = obj_path.rstrip("/") + "/"
+    local_root = tmp_dir / Path(obj_path.rstrip("/")).name
+    for blob in client.list_blobs(bucket_name, prefix=prefix):
+        relative = blob.name[len(prefix):]
+        if not relative:
+            continue
+        dest = local_root / relative
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        blob.download_to_filename(str(dest))
+    return local_root
 
 
 def infer_task_from_labels(labels: list) -> str:
@@ -64,7 +145,7 @@ class EvalDataset:
 # ── Loading ───────────────────────────────────────────────────────────────────
 
 def load_eval_data(
-    path: Path,
+    path: Path | str,
     info: ModelInfo,
     label_col: str = "label",
     max_samples: int = _MAX_EVAL_SAMPLES,
@@ -76,25 +157,34 @@ def load_eval_data(
       .pt   — (inputs, labels) tuple or {"inputs": ..., "labels": ...} dict
       .csv / .parquet — tabular; label_col is the target column
       directory — ImageNet-style class subdirs (cat/, dog/, …)
+      s3://bucket/key or gs://bucket/key — downloaded to a temp dir, then loaded
 
     If *metric_override* is given (e.g. "mae", "f1_macro"), it is validated
     against the inferred task from the label distribution and used instead of
     the auto-detected metric.  Raises ValueError on mismatch.
     """
     task, metric = auto_metric(info)
-    path = Path(path)
 
-    if path.is_dir():
-        dataset = _load_image_dir(path, info, max_samples, task, metric)
-    elif path.suffix.lower() == ".pt":
-        dataset = _load_pt(path, max_samples, task, metric)
-    elif path.suffix.lower() in (".parquet", ".csv"):
-        dataset = _load_tabular(path, label_col, max_samples, task, metric)
-    else:
-        raise ValueError(
-            f"Unsupported eval format {path.suffix.lower()!r}. "
-            f"Supported: .pt, .parquet, .csv, or an image directory with class subdirs."
-        )
+    with contextlib.ExitStack() as stack:
+        if _is_cloud_uri(str(path)):
+            tmp_dir = Path(stack.enter_context(
+                tempfile.TemporaryDirectory(prefix="aphex-eval-")
+            ))
+            path = _download_cloud_uri(str(path), tmp_dir)
+        else:
+            path = Path(path)
+
+        if path.is_dir():
+            dataset = _load_image_dir(path, info, max_samples, task, metric)
+        elif path.suffix.lower() == ".pt":
+            dataset = _load_pt(path, max_samples, task, metric)
+        elif path.suffix.lower() in (".parquet", ".csv"):
+            dataset = _load_tabular(path, label_col, max_samples, task, metric)
+        else:
+            raise ValueError(
+                f"Unsupported eval format {path.suffix.lower()!r}. "
+                f"Supported: .pt, .parquet, .csv, or an image directory with class subdirs."
+            )
 
     inferred_task = infer_task_from_labels(dataset.labels)
     if metric_override is not None:

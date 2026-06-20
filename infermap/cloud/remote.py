@@ -13,18 +13,26 @@ import uuid
 from pathlib import Path
 
 
+_CLOUD_SCHEMES = ("s3://", "gs://", "az://")
+
+
+def _is_eval_uri(v: object) -> bool:
+    return isinstance(v, str) and any(v.startswith(s) for s in _CLOUD_SCHEMES)
+
+
 def run_remote_optimize(
     host: str,
     local_model: Path,
     aphex_args: list[str],
     local_output: Path,
     local_metrics: Path | None = None,
-    local_eval: Path | None = None,
+    local_eval: Path | str | None = None,
 ) -> int:
     """Run ``aphex optimize`` on *host* via SSH.
 
     1. Creates a temporary directory on the remote.
-    2. Uploads *local_model* (and *local_eval* if given) via scp.
+    2. Uploads *local_model* via scp. If *local_eval* is a local path, uploads
+       it too. Cloud URIs (s3://, gs://) are passed directly to the remote command.
     3. Runs ``aphex optimize <model> <aphex_args> --output deployment.yaml``
        on the remote, streaming output to the local terminal.
     4. Downloads the resulting deployment.yaml to *local_output*.
@@ -38,18 +46,28 @@ def run_remote_optimize(
     remote_model = f"{remote_dir}/{local_model.name}"
     remote_output = f"{remote_dir}/deployment.yaml"
     remote_metrics = f"{remote_dir}/metrics.json" if local_metrics is not None else None
-    remote_eval = f"{remote_dir}/{local_eval.name}" if local_eval is not None else None
+
+    # Cloud URIs are passed through as-is; local paths are uploaded via scp.
+    eval_is_uri = _is_eval_uri(local_eval)
+    if local_eval is None:
+        remote_eval: str | None = None
+    elif eval_is_uri:
+        remote_eval = str(local_eval)
+    else:
+        local_eval = Path(local_eval)  # type: ignore[arg-type]
+        remote_eval = f"{remote_dir}/{local_eval.name}"  # type: ignore[union-attr]
 
     try:
         _run(["ssh", host, f"mkdir -p {remote_dir}"])
 
         _run(["scp", "-q", str(local_model), f"{host}:{remote_model}"])
 
-        if local_eval is not None:
+        if local_eval is not None and not eval_is_uri:
+            local_eval_path = Path(local_eval)
             scp_eval = ["scp", "-q"]
-            if local_eval.is_dir():
+            if local_eval_path.is_dir():
                 scp_eval.append("-r")
-            scp_eval += [str(local_eval), f"{host}:{remote_eval}"]
+            scp_eval += [str(local_eval_path), f"{host}:{remote_eval}"]
             _run(scp_eval)
 
         extra_args = list(aphex_args)
