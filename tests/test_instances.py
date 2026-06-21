@@ -6,7 +6,6 @@ import pytest
 from infermap.cloud.instances import get_instance_profile, list_targets
 from infermap.profiler import HardwareProfile
 
-
 # ── get_instance_profile: known instances ─────────────────────────────────────
 
 

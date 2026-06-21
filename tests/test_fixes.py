@@ -22,7 +22,6 @@ import torch
 from infermap import registry
 from infermap.converter import read_deployment_yaml
 
-
 # ── evaluator._torch_load ─────────────────────────────────────────────────────
 
 
@@ -94,6 +93,7 @@ def test_sklearn_baseline_failure_is_logged(caplog) -> None:
 
 def test_parse_shape_rejects_garbage() -> None:
     import typer
+
     from infermap.cli import _parse_shape
 
     with pytest.raises(typer.Exit):
@@ -102,6 +102,7 @@ def test_parse_shape_rejects_garbage() -> None:
 
 def test_parse_shape_rejects_zero() -> None:
     import typer
+
     from infermap.cli import _parse_shape
 
     with pytest.raises(typer.Exit):
@@ -110,6 +111,7 @@ def test_parse_shape_rejects_zero() -> None:
 
 def test_parse_batch_sizes_rejects_negative() -> None:
     import typer
+
     from infermap.cli import _parse_batch_sizes
 
     with pytest.raises(typer.Exit):
@@ -217,7 +219,7 @@ def test_cleanup_remote_refuses_unscoped_paths(monkeypatch, caplog) -> None:
     with caplog.at_level(logging.ERROR, logger="infermap.cloud.remote"):
         remote._cleanup_remote("host", "/")
         remote._cleanup_remote("host", "/etc")
-        remote._cleanup_remote("host", "/tmp/something-else")
+        remote._cleanup_remote("host", "/tmp/something-else")  # noqa: S108
 
     assert called == [], "no ssh rm should have been issued"
     assert any("refusing" in r.message for r in caplog.records)
@@ -229,7 +231,7 @@ def test_cleanup_remote_allows_scoped_paths(monkeypatch) -> None:
     called: list[list[str]] = []
     monkeypatch.setattr(remote, "_run", lambda cmd, check=True: called.append(cmd))
 
-    remote._cleanup_remote("host", "/tmp/aphex-abcd1234")
+    remote._cleanup_remote("host", "/tmp/aphex-abcd1234")  # noqa: S108
 
     assert called and called[0][:2] == ["ssh", "host"]
     assert "rm -rf /tmp/aphex-abcd1234" in called[0][2]
@@ -352,8 +354,7 @@ def test_gate_jobs_downgrades_when_gpu_candidates_present(capsys) -> None:
     cands = [_C("cuda"), _C("cpu")]
     result = _gate_jobs(jobs=4, candidates=cands, json_mode=False)
     assert result == 1
-    err = capsys.readouterr().err + capsys.readouterr().out
-    # Warning is printed via err_console; just confirm downgrade.
+    capsys.readouterr()  # Warning is printed via err_console; just confirm downgrade.
 
 
 def test_gate_jobs_downgrades_for_mps(capsys) -> None:

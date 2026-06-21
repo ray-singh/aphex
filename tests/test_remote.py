@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -12,7 +12,6 @@ from infermap.cloud.remote import (
     check_remote_aphex,
     run_remote_optimize,
 )
-
 
 # ── _quote ────────────────────────────────────────────────────────────────────
 
@@ -31,7 +30,7 @@ def test_quote_string_with_single_quote() -> None:
 
 
 def test_quote_path_with_slashes() -> None:
-    assert _quote("/tmp/aphex-abc/model.pt") == "'/tmp/aphex-abc/model.pt'"
+    assert _quote("/tmp/aphex-abc/model.pt") == "'/tmp/aphex-abc/model.pt'"  # noqa: S108
 
 
 def test_quote_empty_string() -> None:
@@ -42,7 +41,7 @@ def test_quote_empty_string() -> None:
 
 
 def test_build_cmd_basic() -> None:
-    cmd = _build_cmd("/tmp/s/model.pt", ["--input-shape", "3,224,224"], "/tmp/s/deployment.yaml")
+    cmd = _build_cmd("/tmp/s/model.pt", ["--input-shape", "3,224,224"], "/tmp/s/deployment.yaml")  # noqa: S108
     assert cmd.startswith("PATH=$HOME/.local/bin:$PATH aphex optimize")
     assert "'/tmp/s/model.pt'" in cmd
     assert "'--input-shape'" in cmd
@@ -86,8 +85,7 @@ def test_check_remote_aphex_returns_false_on_nonzero_exit() -> None:
 
 def test_check_remote_aphex_returns_false_on_timeout() -> None:
     import subprocess
-    with patch("infermap.cloud.remote.subprocess.run", side_effect=subprocess.TimeoutExpired("ssh", 15)):
-        with pytest.raises(Exception):
+    with patch("infermap.cloud.remote.subprocess.run", side_effect=subprocess.TimeoutExpired("ssh", 15)), pytest.raises(Exception):  # noqa: B017
             check_remote_aphex("user@host")
 
 

@@ -1,9 +1,7 @@
 """Tests for infermap.checker — regression check logic."""
 from __future__ import annotations
 
-import pytest
-
-from infermap.checker import CheckResult, _check, _pct_delta, run_check
+from infermap.checker import _check, _pct_delta, run_check
 
 # ── Baseline fixture ──────────────────────────────────────────────────────────
 

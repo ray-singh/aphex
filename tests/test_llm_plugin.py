@@ -13,9 +13,9 @@ from infermap.benchmark import BenchmarkResult
 from infermap.candidates import DeploymentCandidate
 from infermap.inspector import ModelInfo
 from infermap.plugins.llm import (
-    LLMPlugin,
     _LLM_MEASURE_CAP,
     _LLM_WARMUP_CAP,
+    LLMPlugin,
     _config_is_llm,
     _inspect_gguf,
     _inspect_hf_config,
@@ -23,7 +23,6 @@ from infermap.plugins.llm import (
     _read_gguf_metadata,
 )
 from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -332,7 +331,7 @@ def test_benchmark_caps_warmup_and_measure_iters() -> None:
     with patch("infermap.plugins.llm._benchmark_llm", side_effect=_fake_benchmark):
         plugin.benchmark(
             candidate=candidate,
-            model=Path("/tmp/fake.gguf"),
+            model=Path("/tmp/fake.gguf"),  # noqa: S108
             info=_llm_info("llama_cpp"),
             input_shape=[],
             batch_size=1,
@@ -365,7 +364,7 @@ def test_benchmark_does_not_exceed_cap_when_iters_below_cap() -> None:
     with patch("infermap.plugins.llm._benchmark_llm", side_effect=_fake_benchmark):
         plugin.benchmark(
             candidate=candidate,
-            model=Path("/tmp/fake.gguf"),
+            model=Path("/tmp/fake.gguf"),  # noqa: S108
             info=_llm_info("llama_cpp"),
             input_shape=[],
             batch_size=1,

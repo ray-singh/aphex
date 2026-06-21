@@ -6,18 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from infermap.benchmark import BenchmarkResult
-from infermap.candidates import DeploymentCandidate
 from infermap.deployment import DeploymentConfig
-from infermap.inspector import ModelInfo
-from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
-from infermap.recommender import Recommendation
 from infermap.serving import SUPPORTED_FRAMEWORKS, generate_serving_config
-from infermap.serving.triton import TritonGenerator, _triton_backend, _instance_kind
-from infermap.serving.torchserve import TorchServeGenerator
 from infermap.serving.bentoml import BentoMLGenerator
 from infermap.serving.fastapi import FastAPIGenerator
-
+from infermap.serving.torchserve import TorchServeGenerator
+from infermap.serving.triton import TritonGenerator, _instance_kind, _triton_backend
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -56,7 +50,7 @@ def _config(
         max_memory_mb=None,
         min_throughput_rps=None,
         max_quality_loss=None,
-        generated_at=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        generated_at=datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
         system=None,
     )
 
@@ -74,7 +68,7 @@ def test_supported_frameworks_contains_expected() -> None:
 
 def test_unknown_framework_raises() -> None:
     with pytest.raises(ValueError, match="Unknown serving framework"):
-        generate_serving_config("nonexistent", _config(), Path("/tmp"))
+        generate_serving_config("nonexistent", _config(), Path("/tmp"))  # noqa: S108
 
 
 def test_generate_returns_paths(tmp_path: Path) -> None:

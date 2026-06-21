@@ -5,9 +5,11 @@ Excluded from the default test run (downloads weights, takes ~2–5 min).
 """
 
 from __future__ import annotations
+
 import pytest
 import torch
 import torch.nn as nn
+
 from infermap.benchmark import benchmark_candidate
 from infermap.candidates import generate_candidates
 from infermap.inspector import inspect_model

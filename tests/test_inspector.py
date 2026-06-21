@@ -2,9 +2,8 @@
 
 import torch
 import torch.nn as nn
-import pytest
 
-from infermap.inspector import inspect_model, ModelInfo
+from infermap.inspector import inspect_model
 
 
 class TinyTransformer(nn.Module):

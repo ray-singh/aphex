@@ -1,9 +1,8 @@
 """Tests for Pareto frontier builder."""
 
-import pytest
 
-from infermap.candidates import DeploymentCandidate
 from infermap.benchmark import BenchmarkResult
+from infermap.candidates import DeploymentCandidate
 from infermap.pareto import build_pareto_frontier, rank_by_objective
 
 

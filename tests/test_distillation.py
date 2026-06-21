@@ -13,12 +13,10 @@ import torch.nn as nn
 
 from infermap.distillation import (
     DistillConfig,
-    DistillReport,
     distill,
     load_student_factory,
     score,
 )
-
 
 # ── DistillConfig validation ─────────────────────────────────────────────────
 
@@ -58,7 +56,9 @@ def _trained_teacher_classification() -> tuple[nn.Module, list[torch.Tensor], li
     optim = torch.optim.Adam(teacher.parameters(), lr=1e-2)
     for _ in range(120):
         loss = nn.functional.cross_entropy(teacher(X), y)
-        optim.zero_grad(); loss.backward(); optim.step()
+        optim.zero_grad()
+        loss.backward()
+        optim.step()
     teacher.eval()
     inputs = [X[i:i+1] for i in range(200)]
     return teacher, inputs, y.tolist()
@@ -116,7 +116,9 @@ def test_distill_regression_loss_decreases() -> None:
     optim = torch.optim.Adam(teacher.parameters(), lr=1e-2)
     for _ in range(60):
         loss = nn.functional.mse_loss(teacher(X), target)
-        optim.zero_grad(); loss.backward(); optim.step()
+        optim.zero_grad()
+        loss.backward()
+        optim.step()
     teacher.eval()
 
     student = nn.Linear(4, 1)
@@ -149,7 +151,7 @@ def test_distill_freezes_teacher_parameters() -> None:
     student = nn.Linear(8, 3)
     cfg = DistillConfig(epochs=2, batch_size=16, lr=1e-1)  # large LR
     distill(teacher, student, inputs, labels, cfg)
-    for before, after in zip(teacher_params_before, teacher.parameters()):
+    for before, after in zip(teacher_params_before, teacher.parameters(), strict=False):
         assert torch.equal(before, after), "teacher parameters changed during distill"
 
 

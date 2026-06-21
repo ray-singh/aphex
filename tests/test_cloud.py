@@ -1,13 +1,11 @@
 """Tests for infermap.cloud — storage backend, config, and registry operations."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
 from infermap.cloud.storage import MemoryBackend, get_backend
-
 
 # ── MemoryBackend ─────────────────────────────────────────────────────────────
 

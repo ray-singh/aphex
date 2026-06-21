@@ -1,7 +1,6 @@
 """Tests for infermap.converter — model conversion to deployment formats."""
 from __future__ import annotations
 
-import io
 from pathlib import Path
 
 import pytest
@@ -9,18 +8,16 @@ import torch
 import torch.nn as nn
 
 from infermap.converter import (
-    ALL_CONVERTIBLE,
-    _EXT_MAP,
     _ONNX_BACKENDS,
     _OV_BACKENDS,
     _PYTORCH_BACKENDS,
     _TRT_BACKENDS,
+    ALL_CONVERTIBLE,
     _parse_scalar,
     convert,
     default_output_path,
     read_deployment_yaml,
 )
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

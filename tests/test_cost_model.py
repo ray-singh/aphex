@@ -16,7 +16,6 @@ from infermap.cost_model import (
 from infermap.inspector import ModelInfo
 from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 def _info(

@@ -1,6 +1,5 @@
 """End-to-end integration test — full pipeline from saved model file to recommendation."""
 
-import tempfile
 from pathlib import Path
 
 import pytest

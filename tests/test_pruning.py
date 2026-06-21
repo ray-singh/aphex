@@ -10,7 +10,7 @@ import torch.nn as nn
 
 from infermap.benchmark import BenchmarkResult, _is_pruning_backend
 from infermap.candidates import DeploymentCandidate
-from infermap.evaluator import EvalDataset, _PYTORCH_EVAL_BACKENDS, fill_accuracy_drop
+from infermap.evaluator import _PYTORCH_EVAL_BACKENDS, EvalDataset, fill_accuracy_drop
 from infermap.inspector import ModelInfo
 from infermap.plugins.pytorch import PytorchPlugin
 from infermap.pruning import (
@@ -115,7 +115,7 @@ def test_prune_model_returns_modified_model_independent_of_input() -> None:
     m = _two_layer_mlp()
     untouched = copy.deepcopy(m)
     prune_model(m, PruneSpec("unstructured_magnitude", 0.5))
-    for p1, p2 in zip(m.parameters(), untouched.parameters()):
+    for _p1, p2 in zip(m.parameters(), untouched.parameters(), strict=False):
         # The original (untouched) deepcopy should NOT be sparse.
         if p2.ndim >= 2:
             assert (p2 == 0).float().mean().item() < 0.05

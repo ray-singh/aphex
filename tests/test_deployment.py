@@ -18,7 +18,6 @@ from infermap.inspector import ModelInfo
 from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
 from infermap.recommender import Recommendation
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 def _cand(backend: str = "tensorrt_fp16", dtype: str = "fp16", device: str = "cuda") -> DeploymentCandidate:

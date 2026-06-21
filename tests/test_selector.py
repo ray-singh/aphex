@@ -1,12 +1,9 @@
 """Tests for infermap.selector — candidate selector."""
 from __future__ import annotations
 
-import pytest
-
-from infermap.candidates import DeploymentCandidate, generate_candidates
+from infermap.candidates import generate_candidates
 from infermap.inspector import ModelInfo
 from infermap.selector import select_candidates
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

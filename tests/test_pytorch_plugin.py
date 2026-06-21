@@ -2,15 +2,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
-import pytest
 import torch
 import torch.nn as nn
 
 from infermap.benchmark import BenchmarkResult
 from infermap.candidates import DeploymentCandidate
-from infermap.plugins.pytorch import PytorchPlugin, _PYTORCH_EXTENSIONS
+from infermap.plugins.pytorch import _PYTORCH_EXTENSIONS, PytorchPlugin
 from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
 
 

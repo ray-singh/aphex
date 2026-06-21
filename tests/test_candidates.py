@@ -1,8 +1,7 @@
 """Tests for candidate generation."""
 
-import pytest
 
-from infermap.candidates import DeploymentCandidate, generate_candidates
+from infermap.candidates import generate_candidates
 from infermap.inspector import ModelInfo
 from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
 

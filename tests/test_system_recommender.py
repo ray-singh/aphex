@@ -17,7 +17,6 @@ from infermap.system_recommender import (
     recommend_system_config,
 )
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 def _info(

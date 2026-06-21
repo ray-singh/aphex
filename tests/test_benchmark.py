@@ -1,6 +1,5 @@
 """Tests for the benchmark engine."""
 
-import pytest
 import torch
 import torch.nn as nn
 

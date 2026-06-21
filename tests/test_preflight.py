@@ -1,10 +1,9 @@
 """Tests for pre-flight validator."""
 
-import pytest
 
 from infermap.inspector import ModelInfo
-from infermap.profiler import HardwareProfile, CPUProfile, AcceleratorProfile
 from infermap.preflight import run_preflight
+from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
 
 
 def _make_model(params: int = 1_000_000) -> ModelInfo:

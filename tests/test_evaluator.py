@@ -9,8 +9,8 @@ import pytest
 import torch
 
 from infermap.evaluator import (
-    EvalDataset,
     _PYTORCH_EVAL_BACKENDS,
+    EvalDataset,
     auto_metric,
     compute_drop,
     compute_metric,
@@ -20,7 +20,6 @@ from infermap.evaluator import (
     load_infer_fn,
 )
 from infermap.inspector import ModelInfo
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

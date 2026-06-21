@@ -1,10 +1,9 @@
 """Tests for the recommendation engine."""
 
-import pytest
 
 from infermap.benchmark import BenchmarkResult
 from infermap.candidates import DeploymentCandidate
-from infermap.recommender import Recommendation, recommend
+from infermap.recommender import recommend
 
 
 def _cand(description: str) -> DeploymentCandidate:
