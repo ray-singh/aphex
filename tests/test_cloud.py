@@ -76,8 +76,11 @@ def test_get_backend_s3_returns_s3_backend() -> None:
     assert isinstance(backend, S3Backend)
 
 
-def test_get_backend_gcs_returns_gcs_backend() -> None:
-    pytest.importorskip("google.cloud.storage")
+def test_get_backend_gcs_returns_gcs_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    gcs = pytest.importorskip("google.cloud.storage")
+    from unittest.mock import MagicMock
+    mock_client = MagicMock()
+    monkeypatch.setattr(gcs, "Client", lambda: mock_client)
     from infermap.cloud.storage import GCSBackend
     backend = get_backend("gs://my-bucket/aphex")
     assert isinstance(backend, GCSBackend)
