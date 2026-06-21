@@ -6,11 +6,14 @@ import json
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # Must be set before libomp is loaded (i.e. before any torch import).
 # Prevents crash when torch and onnxruntime each ship their own libomp.dylib on macOS.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+if TYPE_CHECKING:
+    from infermap.evaluator import EvalDataset  # noqa: E402
 
 import typer
 from rich import box
@@ -186,7 +189,8 @@ def benchmark(
     candidates = plugin.generate_candidates(info, hw)
     candidates, cost_estimates = _prune_with_cost_model(candidates, info, hw, bs_list[0], json_mode)
     results = _run_candidates(plugin, candidates, model, info, shape, bs_list, warmup, iters, timeout_s, calib, json_mode=json_mode, jobs=jobs)
-    _run_eval(eval_dataset, fn, json_mode, results=results, model=model, info=info)
+    if eval_dataset is not None:
+        _run_eval(eval_dataset, fn, json_mode, results=results, model=model, info=info)
     if json_mode:
         _emit_json(results)
     else:
@@ -372,7 +376,7 @@ def optimize(
     candidates = plugin.generate_candidates(info, hw)
     candidates = _select_with_fingerprint(candidates, info, hw, json_mode)
     results = _run_candidates(plugin, candidates, model, info, shape, bs_list, 10, 100, timeout_s, calib, json_mode=json_mode, jobs=jobs)
-    eval_result = _run_eval(eval_dataset, fn, json_mode, results=results, model=model, info=info)
+    eval_result = _run_eval(eval_dataset, fn, json_mode, results=results, model=model, info=info) if eval_dataset is not None else None
 
     rec = recommend(
         results,
@@ -1229,12 +1233,13 @@ _IMAGENET_STD = [0.229, 0.224, 0.225]
 _CALIB_MAX_SAMPLES = 32
 
 
-def _ensure_type(value: object, expected: type, name: str) -> None:
-    """Internal invariant check that raises TypeError (not AssertionError)."""
+def _ensure_type[T](value: object, expected: type[T], name: str) -> T:
+    """Internal invariant check that raises TypeError and narrows the type."""
     if not isinstance(value, expected):
         raise TypeError(
             f"{name} must be {expected.__name__}, got {type(value).__name__}"
         )
+    return value
 
 
 def _gate_jobs(jobs: int, candidates: list, json_mode: bool) -> int:
@@ -1368,7 +1373,7 @@ def _load_eval(
     label_col: str,
     metric_override: str | None = None,
     required: bool = False,
-) -> object:
+) -> EvalDataset | None:
     if path is None:
         return None
     from infermap.evaluator import load_eval_data
@@ -1388,7 +1393,7 @@ def _load_eval(
         return None
 
 
-def _load_infer_fn(spec: str | None) -> object:
+def _load_infer_fn(spec: str | None) -> Callable[..., Any] | None:
     if spec is None:
         return None
     from infermap.evaluator import load_infer_fn
@@ -1396,8 +1401,8 @@ def _load_infer_fn(spec: str | None) -> object:
 
 
 def _run_eval(
-    eval_dataset: object,
-    infer_fn: object,
+    eval_dataset: EvalDataset,
+    infer_fn: Callable[..., Any] | None,
     json_mode: bool,
     results: list | None = None,
     model: object | None = None,
@@ -1433,13 +1438,14 @@ def _run_eval(
 
     if results is not None and model is not None and info is not None:
         from infermap.evaluator import fill_accuracy_drop
+        from infermap.inspector import ModelInfo
         try:
             if not json_mode:
                 console.print(
                     f"  [dim]measuring accuracy drop ({eval_dataset.metric}) "
                     f"on {len(eval_dataset.inputs)} samples...[/dim]"
                 )
-            fill_accuracy_drop(results, model, info, eval_dataset)
+            fill_accuracy_drop(results, model, _ensure_type(info, ModelInfo, "info"), eval_dataset)
         except Exception as exc:
             err_console.print(f"[yellow]Warning: accuracy drop measurement failed: {exc}[/yellow]")
 
@@ -1456,10 +1462,10 @@ def _select_with_fingerprint(
     from infermap.profiler import HardwareProfile
     from infermap.selector import select_candidates
 
-    _ensure_type(info, ModelInfo, "info")
-    _ensure_type(hw, HardwareProfile, "hw")
+    _info = _ensure_type(info, ModelInfo, "info")
+    _hw = _ensure_type(hw, HardwareProfile, "hw")
 
-    selected, rationale = select_candidates(candidates, info, hw, k=4)
+    selected, rationale = select_candidates(candidates, _info, _hw, k=4)
     if not json_mode:
         console.print(f"  [dim]{rationale}[/dim]\n")
     return selected
@@ -1476,10 +1482,10 @@ def _prune_with_cost_model(
     from infermap.inspector import ModelInfo
     from infermap.profiler import HardwareProfile
 
-    _ensure_type(info, ModelInfo, "info")
-    _ensure_type(hw, HardwareProfile, "hw")
+    _info = _ensure_type(info, ModelInfo, "info")
+    _hw = _ensure_type(hw, HardwareProfile, "hw")
 
-    kept, estimates = prune_candidates(candidates, info, hw, batch_size=batch_size)
+    kept, estimates = prune_candidates(candidates, _info, _hw, batch_size=batch_size)
     pruned = len(candidates) - len(kept)
     if pruned > 0 and not json_mode:
         console.print(
@@ -1503,8 +1509,13 @@ def _run_candidates(
     json_mode: bool = False,
     jobs: int = 1,
 ) -> list:
+    from infermap.candidates import DeploymentCandidate
+    from infermap.inspector import ModelInfo
     from infermap.plugin import ModelPlugin
-    _ensure_type(plugin, ModelPlugin, "plugin")
+    if not isinstance(plugin, ModelPlugin):
+        raise TypeError(f"plugin must be ModelPlugin, got {type(plugin).__name__}")
+    _plugin = plugin
+    _model_info = _ensure_type(model_info, ModelInfo, "model_info")
 
     jobs = _gate_jobs(jobs, candidates, json_mode)
 
@@ -1513,8 +1524,9 @@ def _run_candidates(
 
     def _bench(pair: tuple[object, int]) -> object:
         cand, bs = pair
-        return plugin.benchmark(
-            cand, model, model_info, shape, bs, warmup, iters,
+        return _plugin.benchmark(
+            _ensure_type(cand, DeploymentCandidate, "cand"),
+            model, _model_info, shape, bs, warmup, iters,
             timeout_s, calibration_inputs,
         )
 
@@ -1593,21 +1605,21 @@ def _run_pairs_parallel(
 
 def _result_to_dict(r: object) -> dict:
     from infermap.benchmark import BenchmarkResult
-    _ensure_type(r, BenchmarkResult, "result")
+    _r = _ensure_type(r, BenchmarkResult, "result")
     return {
-        "backend": r.candidate.backend,
-        "dtype": r.candidate.dtype,
-        "device": r.candidate.device,
-        "description": r.candidate.description,
-        "batch_size": r.batch_size,
-        "ok": r.ok,
-        "latency_p50_ms": r.latency_p50_ms if r.ok else None,
-        "latency_p95_ms": r.latency_p95_ms if r.ok else None,
-        "latency_p99_ms": r.latency_p99_ms if r.ok else None,
-        "throughput_rps": r.throughput_rps if r.ok else None,
-        "memory_mb": r.memory_mb if r.ok else None,
-        "accuracy_drop": r.accuracy_drop,
-        "error": r.error,
+        "backend": _r.candidate.backend,
+        "dtype": _r.candidate.dtype,
+        "device": _r.candidate.device,
+        "description": _r.candidate.description,
+        "batch_size": _r.batch_size,
+        "ok": _r.ok,
+        "latency_p50_ms": _r.latency_p50_ms if _r.ok else None,
+        "latency_p95_ms": _r.latency_p95_ms if _r.ok else None,
+        "latency_p99_ms": _r.latency_p99_ms if _r.ok else None,
+        "throughput_rps": _r.throughput_rps if _r.ok else None,
+        "memory_mb": _r.memory_mb if _r.ok else None,
+        "accuracy_drop": _r.accuracy_drop,
+        "error": _r.error,
     }
 
 
@@ -1615,12 +1627,12 @@ def _build_metrics_payload(results: list, recommendation: object = None) -> dict
     payload: dict = {"results": [_result_to_dict(r) for r in results]}
     if recommendation is not None:
         from infermap.recommender import Recommendation
-        _ensure_type(recommendation, Recommendation, "recommendation")
-        r = recommendation.result
+        _rec = _ensure_type(recommendation, Recommendation, "recommendation")
+        r = _rec.result
         payload["recommendation"] = {
             **_result_to_dict(r),
-            "rationale": recommendation.rationale,
-            "pareto_frontier_count": len(recommendation.pareto_frontier),
+            "rationale": _rec.rationale,
+            "pareto_frontier_count": len(_rec.pareto_frontier),
         }
     return payload
 

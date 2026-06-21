@@ -552,7 +552,7 @@ def _export_to_onnx_bytes(model: Any, dummy: Any) -> bytes:
         torch.onnx.export(
             model,
             dummy.to("cpu"),
-            buf,
+            buf,  # type: ignore[arg-type]
             opset_version=17,
             input_names=["input"],
             output_names=["output"],

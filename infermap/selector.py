@@ -143,9 +143,8 @@ def select_candidates(
     if not candidates:
         return [], _rationale(info, hw, [], total=0)
 
-    hw_kind = hw.accelerator.kind  # "cuda", "mps", "none" (CPU-only), or "cpu"
-    if hw_kind == "none":
-        hw_kind = "cpu"
+    raw_kind = hw.accelerator.kind  # "cuda", "mps", "none" (CPU-only)
+    hw_kind: str = "cpu" if raw_kind == "none" else raw_kind
     bf16 = "true" if hw.accelerator.bf16 else "false"
     family = info.family.lower()
 
@@ -192,7 +191,7 @@ def _rationale(
 ) -> str:
     family_label = info.family if info.family != "unknown" else "unknown arch"
     params_m = info.parameters / 1e6
-    hw_label = hw.accelerator.kind.upper() if hw.accelerator.kind != "cpu" else "CPU"
+    hw_label = hw.accelerator.kind.upper() if hw.accelerator.kind != "none" else "CPU"
 
     if not selected:
         return f"fingerprint: {family_label} · {params_m:.1f}M params · {hw_label} → no candidates"

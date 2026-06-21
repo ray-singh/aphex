@@ -366,7 +366,8 @@ def _load_image_dir(
     h = input_shape[1] if len(input_shape) >= 2 else 224
     w = input_shape[2] if len(input_shape) >= 3 else 224
 
-    inputs, labels = [], []
+    inputs: list[Any] = []
+    labels: list[int] = []
     for class_dir in class_dirs:
         cls_idx = class_to_idx[class_dir.name]
         files = sorted(f for f in class_dir.iterdir() if f.suffix.lower() in _IMAGE_EXTENSIONS)

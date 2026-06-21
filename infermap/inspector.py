@@ -311,9 +311,9 @@ def _patch_stub_forwards(model: Any) -> None:
             ) -> tuple[torch.Tensor, torch.Tensor]:
                 x = self.input_proj(x)  # type: ignore[operator]
                 b = x.shape[0]
-                cls = self.cls_token.expand(b, -1, -1)
+                cls = self.cls_token.expand(b, -1, -1)  # type: ignore[operator]
                 x = torch.cat([cls, x], dim=1)
-                x = x + self.pos_emb.weight[:x.shape[1]].unsqueeze(0)
+                x = x + self.pos_emb.weight[:x.shape[1]].unsqueeze(0)  # type: ignore[union-attr,index]
                 x = self.encoder(x)  # type: ignore[operator]
                 out = x[:, 0]
                 return self.rv_head_linear(out), self.shock_head(out)  # type: ignore[operator]
@@ -332,28 +332,28 @@ def _patch_stub_forwards(model: Any) -> None:
                 if "running_mean" in own_buffers:
                     def _bn_fwd(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
                         return F.batch_norm(
-                            x, self.running_mean, self.running_var,
-                            self.weight, self._parameters.get("bias"),
+                            x, self.running_mean, self.running_var,  # type: ignore[arg-type]
+                            self.weight, self._parameters.get("bias"),  # type: ignore[arg-type]
                             False, 0.1, 1e-5,
                         )
                     type(module).forward = _bn_fwd
                 else:
                     def _ln_fwd(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
                         return F.layer_norm(
-                            x, self.weight.shape,
-                            self.weight, self._parameters.get("bias"),
+                            x, self.weight.shape,  # type: ignore[arg-type]
+                            self.weight, self._parameters.get("bias"),  # type: ignore[arg-type]
                         )
                     type(module).forward = _ln_fwd
 
             elif w.dim() == 2:
                 def _linear_fwd(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
-                    return F.linear(x, self.weight, self._parameters.get("bias"))
+                    return F.linear(x, self.weight, self._parameters.get("bias"))  # type: ignore[arg-type]
                 type(module).forward = _linear_fwd
 
             elif w.dim() == 3:
                 def _conv1d_fwd(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
-                    return F.conv1d(
-                        x, self.weight, self._parameters.get("bias"),
+                    return F.conv1d(  # type: ignore[misc]
+                        x, self.weight, self._parameters.get("bias"),  # type: ignore[arg-type]
                         getattr(self, "stride", (1,)),
                         getattr(self, "padding", (0,)),
                         getattr(self, "dilation", (1,)),
@@ -363,8 +363,8 @@ def _patch_stub_forwards(model: Any) -> None:
 
             elif w.dim() == 4:
                 def _conv2d_fwd(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
-                    return F.conv2d(
-                        x, self.weight, self._parameters.get("bias"),
+                    return F.conv2d(  # type: ignore[misc]
+                        x, self.weight, self._parameters.get("bias"),  # type: ignore[arg-type]
                         getattr(self, "stride", (1, 1)),
                         getattr(self, "padding", (0, 0)),
                         getattr(self, "dilation", (1, 1)),
@@ -391,7 +391,7 @@ def _patch_stub_forwards(model: Any) -> None:
                 for name, child in self._modules.items():
                     if name == _rk:
                         continue
-                    out = child(out)
+                    out = child(out)  # type: ignore[misc]
                 return out + residual
 
             type(module).forward = _residual_fwd
@@ -399,7 +399,7 @@ def _patch_stub_forwards(model: Any) -> None:
         else:
             def _sequential_fwd(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
                 for child in self._modules.values():
-                    x = child(x)
+                    x = child(x)  # type: ignore[misc]
                 return x
 
             type(module).forward = _sequential_fwd
