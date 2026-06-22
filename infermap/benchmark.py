@@ -464,8 +464,8 @@ def benchmark_candidate(
         try:
             queue.close()
             queue.join_thread()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("queue cleanup failed: %s", exc)
 
 
 def _worker_inline(
