@@ -87,7 +87,7 @@ def _require_torch() -> None:
     except ImportError:
         raise ImportError(
             "PyTorch is required for this operation. "
-            "Install it with: pip install 'aphex[torch]'"
+            "Install it with: pip install 'aphex-ml[torch]'"
         ) from None
 
 
@@ -274,15 +274,18 @@ def _serialize_model(
     needs_eager = (
         candidate is not None
         and hasattr(candidate, "backend")
-        and candidate.backend in _EAGER_BACKENDS
+        and (candidate.backend in _EAGER_BACKENDS or _is_pruning_backend(candidate.backend))
     )
 
-    # Stub models sent to eager backends need the stub specs shipped alongside
-    # so worker processes can recreate the missing external classes.
-    if _STUB_REGISTRY and needs_eager:
+    # Backends that require an eager nn.Module (torch.compile, dynamic quantization,
+    # pruning) must not be traced to TorchScript. Pickle the module directly.
+    # Stub models also need the stub-class specs so the worker can recreate them.
+    if needs_eager:
         buf = io.BytesIO()
         torch.save(model, buf)
-        return ("stub_module", buf.getvalue(), list(_STUB_REGISTRY))
+        if _STUB_REGISTRY:
+            return ("stub_module", buf.getvalue(), list(_STUB_REGISTRY))
+        return ("module", buf.getvalue())
 
     if input_shape is not None:
         try:
@@ -422,14 +425,29 @@ def benchmark_candidate(
         else timeout_s
     )
 
-    proc.start()
-    proc.join(timeout=effective_timeout)
+    try:
+        proc.start()
+        proc.join(timeout=effective_timeout)
 
-    if proc.is_alive():
-        proc.terminate()
-        proc.join(timeout=5)
         if proc.is_alive():
-            proc.kill()
+            proc.terminate()
+            proc.join(timeout=5)
+            if proc.is_alive():
+                proc.kill()
+            return BenchmarkResult(
+                candidate=candidate,
+                latency_p50_ms=0.0,
+                latency_p95_ms=0.0,
+                latency_p99_ms=0.0,
+                throughput_rps=0.0,
+                memory_mb=0.0,
+                batch_size=batch_size,
+                error=f"timed out after {effective_timeout:.0f}s",
+            )
+
+        if not queue.empty():
+            return queue.get_nowait()
+
         return BenchmarkResult(
             candidate=candidate,
             latency_p50_ms=0.0,
@@ -438,22 +456,16 @@ def benchmark_candidate(
             throughput_rps=0.0,
             memory_mb=0.0,
             batch_size=batch_size,
-            error=f"timed out after {effective_timeout:.0f}s",
+            error="subprocess exited without result",
         )
-
-    if not queue.empty():
-        return queue.get_nowait()
-
-    return BenchmarkResult(
-        candidate=candidate,
-        latency_p50_ms=0.0,
-        latency_p95_ms=0.0,
-        latency_p99_ms=0.0,
-        throughput_rps=0.0,
-        memory_mb=0.0,
-        batch_size=batch_size,
-        error="subprocess exited without result",
-    )
+    finally:
+        # Release the Queue's pipe FD + feeder thread. Without this, long sweeps
+        # accumulate open FDs and can hit "Too many open files" on macOS.
+        try:
+            queue.close()
+            queue.join_thread()
+        except Exception:
+            pass
 
 
 def _worker_inline(

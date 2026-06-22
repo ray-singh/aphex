@@ -4,7 +4,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from infermap.cloud.remote import (
     _build_cmd,
@@ -85,8 +84,11 @@ def test_check_remote_aphex_returns_false_on_nonzero_exit() -> None:
 
 def test_check_remote_aphex_returns_false_on_timeout() -> None:
     import subprocess
-    with patch("infermap.cloud.remote.subprocess.run", side_effect=subprocess.TimeoutExpired("ssh", 15)), pytest.raises(Exception):  # noqa: B017
-            check_remote_aphex("user@host")
+    with patch(
+        "infermap.cloud.remote.subprocess.run",
+        side_effect=subprocess.TimeoutExpired("ssh", 15),
+    ):
+        assert check_remote_aphex("user@host") is False
 
 
 # ── run_remote_optimize ───────────────────────────────────────────────────────

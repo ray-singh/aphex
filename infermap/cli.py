@@ -964,7 +964,7 @@ def push(
         err_console.print(str(exc))
         raise typer.Exit(code=1)
 
-    ver = version or datetime.datetime.utcnow().strftime("v%Y%m%d-%H%M%S")
+    ver = version or datetime.datetime.now(datetime.UTC).strftime("v%Y%m%d-%H%M%S")
 
     console.print(f"  [dim]registry[/dim]  {uri}")
     console.print(f"  [dim]pushing[/dim]   [bold]{name}@{ver}[/bold]")
@@ -1156,7 +1156,7 @@ def _remote_optimize(
         if not check_remote_aphex(host):
             err_console.print(
                 f"aphex not found on {host}.\n"
-                "Install it with: ssh {host} 'pip install aphex'"
+                f"Install it with: ssh {host} 'pip install aphex-ml'"
             )
             raise typer.Exit(code=1)
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import pickle
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,9 @@ Framework = str   # e.g. "pytorch", "sklearn", "xgboost", "unknown"
 # (module_name, class_name, is_nn_module) for every stub class created by _StubPickle.
 # Workers that need to unpickle stub models read this to recreate the same classes.
 _STUB_REGISTRY: list[tuple[str, str, bool]] = []
+
+# Guards the global torch.storage._load_from_bytes monkey-patch inside _load_model.
+_LOAD_LOCK = threading.Lock()
 
 BYTES_PER_PARAM: dict[str, float] = {
     "fp32": 4.0,
@@ -149,19 +153,22 @@ def _load_model(path: Path) -> Any:
     def _lfb_cpu(b: bytes) -> Any:
         return torch.load(io.BytesIO(b), map_location="cpu", weights_only=False)
 
-    _ts._load_from_bytes = _lfb_cpu
-    try:
-        # torch.load handles .pt / .pth (legacy binary and new ZIP formats).
-        # Plain Python pickles (.pkl) don't have the torch magic number header,
-        # so we fall back to pickle.load with our stub Unpickler for those.
+    # Serialize the monkey-patch so concurrent _load_model calls in the same
+    # process don't race on _ts._load_from_bytes.
+    with _LOAD_LOCK:
+        _ts._load_from_bytes = _lfb_cpu
         try:
-            obj = torch.load(path, map_location="cpu", weights_only=False,
-                             pickle_module=_StubPickle)
-        except RuntimeError:
-            with open(path, "rb") as fh:
-                obj = _StubPickle.Unpickler(fh).load()
-    finally:
-        _ts._load_from_bytes = _orig_lfb
+            # torch.load handles .pt / .pth (legacy binary and new ZIP formats).
+            # Plain Python pickles (.pkl) don't have the torch magic number header,
+            # so we fall back to pickle.load with our stub Unpickler for those.
+            try:
+                obj = torch.load(path, map_location="cpu", weights_only=False,
+                                 pickle_module=_StubPickle)
+            except RuntimeError:
+                with open(path, "rb") as fh:
+                    obj = _StubPickle.Unpickler(fh).load()
+        finally:
+            _ts._load_from_bytes = _orig_lfb
 
     # Some saved objects are non-Module wrappers (e.g. training harnesses) that
     # hold the actual network under a `.net` attribute.  Check this first so that

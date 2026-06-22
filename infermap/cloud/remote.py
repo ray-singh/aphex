@@ -81,10 +81,11 @@ def run_remote_optimize(
 
     Returns the exit code of the remote aphex command.
     """
+    _reject_conflicting_args(aphex_args)
     layout = _RemoteLayout.for_session(local_model, local_eval, local_metrics is not None)
 
     try:
-        _run(["ssh", host, f"mkdir -p {layout.dir}"])
+        _run(["ssh", host, f"mkdir -p {_quote(layout.dir)}"])
 
         _run(["scp", "-q", str(local_model), f"{host}:{layout.model}"])
 
@@ -128,22 +129,43 @@ def _cleanup_remote(host: str, remote_dir: str) -> None:
         logger.error("refusing to cleanup unexpected remote dir: %r", remote_dir)
         return
     try:
-        _run(["ssh", host, f"rm -rf {remote_dir}"], check=False)
+        _run(["ssh", host, f"rm -rf {_quote(remote_dir)}"], check=False)
     except Exception as exc:
         logger.warning("remote cleanup of %s on %s failed: %s", remote_dir, host, exc)
 
 
 def check_remote_aphex(host: str) -> bool:
-    """Return True if aphex is installed and reachable on *host*."""
-    result = subprocess.run(
-        ["ssh", host, "PATH=$HOME/.local/bin:$PATH command -v aphex"],
-        capture_output=True,
-        timeout=15,
-    )
+    """Return True if aphex is installed and reachable on *host*.
+
+    Returns False (rather than raising) on SSH timeout, connection refused,
+    or any other OS-level failure — so the caller can show a clean install
+    hint instead of a traceback.
+    """
+    try:
+        result = subprocess.run(
+            ["ssh", host, "PATH=$HOME/.local/bin:$PATH command -v aphex"],
+            capture_output=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("ssh to %s failed during install check: %s", host, exc)
+        return False
     return result.returncode == 0
 
 
 # ── internals ─────────────────────────────────────────────────────────────────
+
+
+def _reject_conflicting_args(aphex_args: list[str]) -> None:
+    # We append --output (and optionally --metrics) on the remote side; a
+    # second occurrence from the caller would make argparse error out after
+    # we've already uploaded the model. Catch it up front with a clear message.
+    for flag in ("--output", "--metrics", "--eval"):
+        if flag in aphex_args:
+            raise ValueError(
+                f"{flag} cannot be passed through --remote; "
+                "use the matching CLI flag on `aphex optimize --remote ...` instead."
+            )
 
 
 def _build_cmd(remote_model: str, aphex_args: list[str], remote_output: str, remote_metrics: str | None = None) -> str:

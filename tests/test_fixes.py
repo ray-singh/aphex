@@ -234,7 +234,7 @@ def test_cleanup_remote_allows_scoped_paths(monkeypatch) -> None:
     remote._cleanup_remote("host", "/tmp/aphex-abcd1234")  # noqa: S108
 
     assert called and called[0][:2] == ["ssh", "host"]
-    assert "rm -rf /tmp/aphex-abcd1234" in called[0][2]
+    assert "rm -rf '/tmp/aphex-abcd1234'" in called[0][2]
 
 
 # ── registry: explicit / lazy default plugin loading ─────────────────────────

@@ -417,6 +417,10 @@ def _run_vllm(
     llm = LLM(model=model_path, dtype=dtype)
     params = SamplingParams(max_tokens=_LLM_N_GEN, temperature=0.0)
 
+    # Reset so the reported VRAM reflects this candidate, not a prior one's peak.
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
     # vLLM offline mode reports total generation latency, not TTFT.
     latencies_ms: list[float] = []
     tps: list[float] = []
