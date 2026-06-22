@@ -1,6 +1,6 @@
 [project]
 name = "aphex-ml"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "Hardware-aware ML deployment optimization and recommendation framework"
 readme = "README.md"
 license = { file = "LICENSE" }
