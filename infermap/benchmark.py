@@ -235,6 +235,7 @@ def _serialize_model(
     model: nn.Module,
     input_shape: list[int] | None = None,
     candidate: Any = None,
+    model_info: ModelInfo | None = None,
 ) -> tuple[Any, ...]:
     """Serialize a model to bytes for cross-process transfer.
 
@@ -289,7 +290,11 @@ def _serialize_model(
 
     if input_shape is not None:
         try:
-            dummy = torch.zeros(1, *input_shape)
+            vocab = getattr(model_info, "vocab_size", None) if model_info is not None else None
+            if vocab:
+                dummy = torch.zeros(1, *input_shape, dtype=torch.long)
+            else:
+                dummy = torch.zeros(1, *input_shape)
             with torch.no_grad():
                 # check_trace=False: nn.MultiheadAttention and similar modules
                 # produce different JIT IR variable names across invocations
@@ -404,7 +409,7 @@ def benchmark_candidate(
             candidate, model, model_info, input_shape, batch_size, warmup_iters, measure_iters, calibration_inputs
         )
 
-    model_payload = _serialize_model(model, input_shape, candidate)
+    model_payload = _serialize_model(model, input_shape, candidate, model_info)
 
     ctx = mp.get_context("spawn")
     queue: mp.Queue[BenchmarkResult] = ctx.Queue()
@@ -527,7 +532,7 @@ def _run_benchmark(
             getattr(model_info, "family", None),
         )
 
-    prepared_model, dummy_input, weight_mb = _prepare(candidate, model, input_shape, batch_size, device, calibration_inputs)
+    prepared_model, dummy_input, weight_mb = _prepare(candidate, model, input_shape, batch_size, device, calibration_inputs, model_info)
 
     timings_ms = _time_model(prepared_model, dummy_input, device, warmup_iters, measure_iters)
     memory_mb = _measure_memory(prepared_model, dummy_input, device, weight_mb)
@@ -581,6 +586,7 @@ def _prepare(
     batch_size: int,
     device: Any,
     calibration_inputs: list[Any] | None = None,
+    model_info: ModelInfo | None = None,
 ) -> tuple[Any, Any, float]:
     import copy
     import warnings
@@ -617,7 +623,11 @@ def _prepare(
             )
         m = torch.compile(m)
 
-    dummy = torch.randn(batch_size, *input_shape, dtype=torch_dtype, device=device)
+    vocab = getattr(model_info, "vocab_size", None) if model_info is not None else None
+    if vocab:
+        dummy = torch.randint(0, vocab, (batch_size, *input_shape), dtype=torch.long, device=device)
+    else:
+        dummy = torch.randn(batch_size, *input_shape, dtype=torch_dtype, device=device)
 
     # Compute weight memory before quantization/ONNX conversion (quantized tensors
     # and ONNX sessions don't expose parameters in the same way).
@@ -697,7 +707,7 @@ def _prepare_onnx(
         providers = ["CPUExecutionProvider"]
 
     sess = ort.InferenceSession(onnx_bytes, providers=providers)
-    return sess, dummy.to("cpu").float()
+    return sess, dummy.to("cpu")
 
 
 def _prepare_onnx_int8(model: Any, dummy: torch.Tensor) -> tuple[Any, torch.Tensor]:
@@ -733,7 +743,7 @@ def _prepare_onnx_int8(model: Any, dummy: torch.Tensor) -> tuple[Any, torch.Tens
         # InferenceSession loads model into memory, so tmpdir can be deleted after.
         sess = ort.InferenceSession(str(quant_path), providers=["CPUExecutionProvider"])
 
-    return sess, dummy.to("cpu").float()
+    return sess, dummy.to("cpu")
 
 
 def _make_trt_calibrator(calibration_inputs: list[Any]) -> Any:
