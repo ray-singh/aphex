@@ -150,6 +150,7 @@ class SklearnPlugin(ModelPlugin):
         measure_iters: int,
         timeout_s: float | None,
         calibration_inputs: list[Any] | None,
+        input_spec: Any = None,
     ) -> BenchmarkResult:
         try:
             return _run_benchmark(

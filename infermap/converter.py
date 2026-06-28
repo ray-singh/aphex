@@ -69,6 +69,7 @@ def convert(
     input_shape: list[int],
     output_path: Path,
     calibration_inputs: list[Any] | None = None,
+    input_spec: Any = None,
 ) -> list[Path]:
     """Export *model* to *backend* format and write to *output_path*.
 
@@ -79,10 +80,16 @@ def convert(
     Returns a list of written file paths (OpenVINO produces .xml + .bin).
     Raises ValueError for unsupported backends, RuntimeError on conversion failure.
     """
+    if input_spec is not None and not input_spec.is_single and backend in (_TRT_BACKENDS | _OV_BACKENDS):
+        raise RuntimeError(
+            f"{backend!r} does not yet support multi-input models "
+            f"({len(input_spec.tensors)} inputs); convert to an ONNX or PyTorch backend."
+        )
+
     if backend in _PYTORCH_BACKENDS:
         return _convert_pytorch(model, backend, output_path)
     if backend in _ONNX_BACKENDS:
-        return _convert_onnx(model, backend, input_shape, output_path)
+        return _convert_onnx(model, backend, input_shape, output_path, input_spec)
     if backend in _TRT_BACKENDS:
         return _convert_tensorrt(model, backend, input_shape, output_path, calibration_inputs)
     if backend in _OV_BACKENDS:
@@ -121,7 +128,12 @@ def _convert_pytorch(model: Any, backend: str, output_path: Path) -> list[Path]:
     # pytorch_fp32: save as-is
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(m, output_path)
+    if isinstance(m, torch.jit.ScriptModule):
+        # torch.save can't pickle a ScriptModule (no __getstate__); use the
+        # TorchScript archive writer, which torch.jit.load reads back.
+        torch.jit.save(m, str(output_path))
+    else:
+        torch.save(m, output_path)
     return [output_path]
 
 
@@ -130,6 +142,7 @@ def _convert_onnx(
     backend: str,
     input_shape: list[int],
     output_path: Path,
+    input_spec: Any = None,
 ) -> list[Path]:
     import torch
     import torch.nn as nn
@@ -137,8 +150,17 @@ def _convert_onnx(
         return _convert_sklearn_onnx(model, backend, input_shape, output_path)
 
     m = copy.deepcopy(model).cpu().eval().float()
-    dummy = torch.zeros(1, *input_shape)
-    onnx_bytes = _export_to_onnx_bytes(m, dummy)
+    if input_spec is not None and not input_spec.is_single:
+        dummy: Any = tuple(
+            torch.zeros(1, *ts.shape, dtype=torch.long if ts.dtype == "long" else torch.float32)
+            for ts in input_spec.tensors
+        )
+        names: list[str] | None = input_spec.names
+        axes: dict | None = input_spec.dynamic_axes()
+    else:
+        dummy = torch.zeros(1, *input_shape)
+        names, axes = None, None
+    onnx_bytes = _export_to_onnx_bytes(m, dummy, names, axes)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 

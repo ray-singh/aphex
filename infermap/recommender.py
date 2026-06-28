@@ -14,6 +14,7 @@ class Recommendation:
     rationale: str
     pareto_frontier: list[BenchmarkResult]
     all_results: list[BenchmarkResult]
+    notes: list[str] | None = None  # measurement-quality caveats (ties, noise)
 
 
 def recommend(
@@ -73,13 +74,53 @@ def recommend(
     best = ranked[0]
 
     rationale = _build_rationale(best, objective, max_latency_ms, max_memory_mb, min_throughput_rps, max_quality_loss)
+    notes = _measurement_notes(best, passing, objective)
 
     return Recommendation(
         result=best,
         rationale=rationale,
         pareto_frontier=frontier,
         all_results=results,
+        notes=notes,
     )
+
+
+def _measurement_notes(
+    best: BenchmarkResult,
+    passing: list[BenchmarkResult],
+    objective: str,
+) -> list[str]:
+    """Caveats about whether the ranking is trustworthy given measurement noise."""
+    notes: list[str] = []
+
+    # The winner's own jitter — a noisy measurement means the number is soft.
+    if best.stability != "stable" and best.latency_p50_ms > 0:
+        notes.append(
+            f"Measurement was {best.stability} (latency CV "
+            f"{best.latency_cv * 100:.0f}%); re-run for a firmer number "
+            "(close other apps, pin CPU clocks, or raise --measure-iters)."
+        )
+
+    # Is the winner actually distinguishable from the next-best alternative?
+    # Compare against all passing candidates, not just the Pareto frontier — the
+    # runner-up is often dominated (and dropped from the frontier) yet still the
+    # choice a user would otherwise make. Latency/throughput both rank on p50.
+    if objective in ("latency", "throughput") and best.latency_p50_ms > 0:
+        others = [r for r in passing if r is not best]
+        ranked_others = rank_by_objective(others, objective)
+        if ranked_others:
+            second = ranked_others[0]
+            delta = abs(best.latency_p50_ms - second.latency_p50_ms)
+            jitter = best.latency_std_ms + second.latency_std_ms
+            if delta <= jitter:
+                notes.append(
+                    f"#1 ({best.candidate.description}) and #2 "
+                    f"({second.candidate.description}) are within measurement noise "
+                    f"(Δp50 {delta:.3f} ms ≤ jitter {jitter:.3f} ms); the choice "
+                    "between them is not statistically significant."
+                )
+
+    return notes
 
 
 def _build_rationale(
@@ -100,7 +141,12 @@ def _build_rationale(
         parts.append(f"Peak memory: {result.memory_mb:.1f} MB.")
 
     if result.accuracy_drop is not None:
-        parts.append(f"Quality loss vs original model: {result.accuracy_drop * 100:.2f}%.")
+        metric = result.accuracy_metric or "cosine_distance"
+        if metric == "kl_divergence_nats":
+            parts.append(f"KL divergence vs original model: {result.accuracy_drop:.4f} nats.")
+        else:
+            label = metric.replace("_", " ")
+            parts.append(f"{label} vs original model: {result.accuracy_drop * 100:.2f}%.")
 
     constraints: list[str] = []
     if max_latency_ms is not None:

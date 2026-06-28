@@ -144,3 +144,54 @@ def test_rationale_includes_constraints_when_given() -> None:
     results = [_result("fast", latency=2.0, memory=100.0)]
     rec = recommend(results, objective="latency", max_latency_ms=10.0, max_memory_mb=200.0)
     assert "10.0" in rec.rationale or "200" in rec.rationale
+
+
+# ── measurement-variance reporting ───────────────────────────────────────────
+
+
+def _result_with_std(description: str, latency: float, std: float) -> BenchmarkResult:
+    return BenchmarkResult(
+        candidate=_cand(description),
+        latency_p50_ms=latency,
+        latency_p95_ms=latency * 1.1,
+        latency_p99_ms=latency * 1.2,
+        throughput_rps=(1000.0 / latency) if latency > 0 else 0.0,
+        memory_mb=100.0,
+        latency_std_ms=std,
+    )
+
+
+def test_stability_property_buckets() -> None:
+    assert _result_with_std("a", 10.0, 0.1).stability == "stable"    # cv 1%
+    assert _result_with_std("b", 10.0, 1.0).stability == "noisy"     # cv 10%
+    assert _result_with_std("c", 10.0, 3.0).stability == "unstable"  # cv 30%
+
+
+def test_latency_cv_zero_when_no_latency() -> None:
+    assert _result_with_std("x", 0.0, 5.0).latency_cv == 0.0
+
+
+def test_tie_note_when_top2_within_noise() -> None:
+    # 10.0 vs 10.2 ms, but each jitters ±0.5 ms → indistinguishable.
+    results = [
+        _result_with_std("A", 10.0, 0.5),
+        _result_with_std("B", 10.2, 0.5),
+    ]
+    rec = recommend(results, objective="latency")
+    assert rec.notes
+    assert any("not statistically significant" in n for n in rec.notes)
+
+
+def test_no_tie_note_when_clearly_separated() -> None:
+    results = [
+        _result_with_std("fast", 2.0, 0.05),
+        _result_with_std("slow", 20.0, 0.05),
+    ]
+    rec = recommend(results, objective="latency")
+    assert not any("statistically significant" in n for n in (rec.notes or []))
+
+
+def test_noisy_winner_gets_rerun_note() -> None:
+    results = [_result_with_std("only", 10.0, 3.0)]  # cv 30% → unstable
+    rec = recommend(results, objective="latency")
+    assert any("re-run" in n for n in (rec.notes or []))

@@ -620,6 +620,7 @@ def _fill_pytorch(results: list, model: Any, eval_dataset: EvalDataset) -> None:
             continue
         candidate_score = compute_metric(candidate_outputs, eval_dataset.labels, eval_dataset.metric)
         r.accuracy_drop = compute_drop(baseline_score, candidate_score, eval_dataset.metric)
+        r.accuracy_metric = eval_dataset.metric
 
 
 def _run_in_dtype(model: Any, inputs: list, dtype: Any) -> list | None:
@@ -790,6 +791,7 @@ def _fill_sklearn(results: list, model: Any, eval_dataset: EvalDataset) -> None:
         candidate_outputs = _sklearn_raw_to_list(candidate_raw)
         candidate_score = compute_metric(candidate_outputs, eval_dataset.labels, eval_dataset.metric)
         r.accuracy_drop = compute_drop(baseline_score, candidate_score, eval_dataset.metric)
+        r.accuracy_metric = eval_dataset.metric
 
 
 def _sklearn_raw_to_list(raw: Any) -> list:

@@ -52,5 +52,6 @@ class ModelPlugin(ABC):
         measure_iters: int,
         timeout_s: float | None,
         calibration_inputs: list[Any] | None,
+        input_spec: Any = None,
     ) -> BenchmarkResult:
         """Benchmark a single deployment candidate and return timing + memory results."""

@@ -94,6 +94,7 @@ class LLMPlugin(ModelPlugin):
         measure_iters: int,
         timeout_s: float | None,
         calibration_inputs: list[Any] | None,
+        input_spec: Any = None,
     ) -> BenchmarkResult:
         n_warm = min(warmup_iters, _LLM_WARMUP_CAP)
         n_meas = min(measure_iters, _LLM_MEASURE_CAP)

@@ -1,5 +1,6 @@
 """Tests for the benchmark engine."""
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -217,3 +218,108 @@ def test_benchmark_bad_input_shape_returns_error() -> None:
 
     assert not result.ok
     assert result.error is not None
+
+
+# ── representative timing input (_timing_input) ──────────────────────────────
+
+
+def test_timing_input_uses_representative_sample() -> None:
+    from infermap.benchmark import _timing_input
+
+    sample = torch.full((4,), 7.0)
+    out = _timing_input([sample], 4, [4], torch.float32, torch.device("cpu"), None)
+    assert out.shape == (4, 4)
+    assert bool((out == 7.0).all())  # real values reused, not random
+
+
+def test_timing_input_tiles_batched_sample() -> None:
+    from infermap.benchmark import _timing_input
+
+    sample = torch.full((1, 4), 3.0)  # already has a batch dim
+    out = _timing_input([sample], 2, [4], torch.float32, torch.device("cpu"), None)
+    assert out.shape == (2, 4)
+    assert bool((out == 3.0).all())
+
+
+def test_timing_input_falls_back_on_shape_mismatch() -> None:
+    from infermap.benchmark import _timing_input
+
+    bad = torch.full((8,), 1.0)  # doesn't match input_shape [4]
+    out = _timing_input([bad], 3, [4], torch.float32, torch.device("cpu"), None)
+    assert out.shape == (3, 4)  # falls back to correctly-shaped random
+
+
+def test_timing_input_random_when_no_samples() -> None:
+    from infermap.benchmark import _timing_input
+
+    out = _timing_input(None, 2, [4], torch.float32, torch.device("cpu"), None)
+    assert out.shape == (2, 4)
+
+
+def test_timing_input_vocab_uses_long_dtype() -> None:
+    from infermap.benchmark import _timing_input
+
+    out = _timing_input(None, 2, [5], torch.float32, torch.device("cpu"), 100)
+    assert out.dtype == torch.long
+    assert out.shape == (2, 5)
+
+
+# ── multi-input benchmarking ─────────────────────────────────────────────────
+
+
+class _TwoInputModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.a = nn.Linear(4, 8)
+        self.b = nn.Linear(6, 8)
+        self.head = nn.Linear(8, 3)
+
+    def forward(self, x, y):  # noqa: ANN001
+        return self.head(torch.relu(self.a(x) + self.b(y)))
+
+
+def _two_input_info() -> ModelInfo:
+    return ModelInfo(
+        framework="pytorch", family="mlp", parameters=0, trainable_parameters=0,
+        estimated_memory_fp32_gb=0.0, estimated_memory_fp16_gb=0.0,
+        input_shape=[4], model_path="t",
+    )
+
+
+def test_benchmark_multi_input_pytorch() -> None:
+    from infermap.inputspec import InputSpec
+
+    spec = InputSpec.parse("x:4;y:6")
+    cand = DeploymentCandidate("pytorch_fp32", "fp32", "PyTorch FP32", False, "cpu")
+    r = benchmark_candidate(
+        cand, _TwoInputModel().eval(), _two_input_info(), [4],
+        batch_size=2, timeout_s=None, input_spec=spec,
+    )
+    assert r.ok
+    assert r.latency_p50_ms > 0
+
+
+def test_benchmark_multi_input_onnx() -> None:
+    pytest.importorskip("onnxruntime")
+    from infermap.inputspec import InputSpec
+
+    spec = InputSpec.parse("x:4;y:6")
+    cand = DeploymentCandidate("onnx_cpu", "fp32", "ONNX CPU", True, "cpu")
+    r = benchmark_candidate(
+        cand, _TwoInputModel().eval(), _two_input_info(), [4],
+        batch_size=2, timeout_s=None, input_spec=spec,
+    )
+    assert r.ok
+
+
+def test_benchmark_multi_input_tensorrt_errors() -> None:
+    from infermap.inputspec import InputSpec
+
+    spec = InputSpec.parse("x:4;y:6")
+    cand = DeploymentCandidate("tensorrt_fp16", "fp16", "TensorRT FP16", True, "cpu")
+    r = benchmark_candidate(
+        cand, _TwoInputModel().eval(), _two_input_info(), [4],
+        batch_size=2, timeout_s=None, input_spec=spec,
+    )
+    assert not r.ok
+    assert "multi-input" in (r.error or "")

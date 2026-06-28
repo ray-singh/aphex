@@ -55,9 +55,10 @@ class PytorchPlugin(ModelPlugin):
         measure_iters: int,
         timeout_s: float | None,
         calibration_inputs: list[Any] | None,
+        input_spec: Any = None,
     ) -> BenchmarkResult:
         from infermap.benchmark import benchmark_candidate
         return benchmark_candidate(
             candidate, model, info, input_shape, batch_size,
-            warmup_iters, measure_iters, timeout_s, calibration_inputs,
+            warmup_iters, measure_iters, timeout_s, calibration_inputs, input_spec,
         )

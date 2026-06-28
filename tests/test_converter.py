@@ -242,6 +242,26 @@ def test_convert_pytorch_bf16_weights_are_bfloat16(tmp_path: Path) -> None:
     assert all(p.dtype == torch.bfloat16 for p in params)
 
 
+def test_convert_scripted_module_pytorch_fp32(tmp_path: Path) -> None:
+    # Regression: torch.save can't pickle a ScriptModule; converter must fall
+    # back to torch.jit.save so scripted models (e.g. resnet18.pt) round-trip.
+    scripted = torch.jit.script(_tiny_model())
+    out = tmp_path / "scripted_fp32.pt"
+    written = convert(scripted, "pytorch_fp32", _INPUT_SHAPE, out)
+    assert written == [out]
+    reloaded = torch.jit.load(str(out))
+    x = torch.randn(1, 4)
+    assert torch.allclose(scripted(x), reloaded(x), atol=1e-6)
+
+
+def test_convert_scripted_module_pytorch_fp16(tmp_path: Path) -> None:
+    scripted = torch.jit.script(_tiny_model())
+    out = tmp_path / "scripted_fp16.pt"
+    convert(scripted, "pytorch_fp16", _INPUT_SHAPE, out)
+    reloaded = torch.jit.load(str(out))
+    assert all(p.dtype == torch.float16 for p in reloaded.parameters())
+
+
 def test_convert_pytorch_int8_dynamic_creates_file(tmp_path: Path) -> None:
     out = tmp_path / "model_int8.pt"
     written = convert(_tiny_model(), "pytorch_int8_dynamic", _INPUT_SHAPE, out)
@@ -439,3 +459,48 @@ def test_convert_sklearn_does_not_mutate_model(tmp_path: Path) -> None:
 def test_convert_sklearn_default_output_path_extension(tmp_path: Path) -> None:
     p = default_output_path(tmp_path / "model.joblib", "onnx_cpu")
     assert p.suffix == ".onnx"
+
+
+# ── multi-input conversion ──────────────────────────────────────────────────
+
+
+class _TwoInputNet(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.a = nn.Linear(4, 8)
+        self.b = nn.Linear(6, 8)
+        self.head = nn.Linear(8, 3)
+
+    def forward(self, x, y):  # noqa: ANN001
+        return self.head(torch.relu(self.a(x) + self.b(y)))
+
+
+def test_convert_multi_input_onnx_names_inputs(tmp_path: Path) -> None:
+    pytest.importorskip("onnxruntime")
+    import onnxruntime as ort
+
+    from infermap.inputspec import InputSpec
+
+    spec = InputSpec.parse("x:4;y:6")
+    out = tmp_path / "multi.onnx"
+    convert(_TwoInputNet().eval(), "onnx_cpu", spec.primary_shape, out, input_spec=spec)
+    names = [i.name for i in ort.InferenceSession(str(out)).get_inputs()]
+    assert names == ["x", "y"]
+
+
+def test_convert_multi_input_tensorrt_raises(tmp_path: Path) -> None:
+    from infermap.inputspec import InputSpec
+
+    spec = InputSpec.parse("x:4;y:6")
+    with pytest.raises(RuntimeError, match="multi-input"):
+        convert(_TwoInputNet().eval(), "tensorrt_fp16", spec.primary_shape,
+                tmp_path / "x.engine", input_spec=spec)
+
+
+def test_convert_multi_input_openvino_raises(tmp_path: Path) -> None:
+    from infermap.inputspec import InputSpec
+
+    spec = InputSpec.parse("x:4;y:6")
+    with pytest.raises(RuntimeError, match="multi-input"):
+        convert(_TwoInputNet().eval(), "openvino_fp32", spec.primary_shape,
+                tmp_path / "x.xml", input_spec=spec)

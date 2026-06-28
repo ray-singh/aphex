@@ -169,11 +169,35 @@ class BenchmarkResult:
     memory_mb: float
     batch_size: int = 1
     error: str | None = None
-    accuracy_drop: float | None = None  # cosine-similarity drop vs FP32 baseline; None if not measured
+    accuracy_drop: float | None = None  # quality loss vs FP32 baseline; None if not measured
+    accuracy_metric: str | None = None  # "cosine_distance", "kl_divergence_nats", "accuracy", etc.
+    latency_std_ms: float = 0.0  # std-dev of per-iteration timings (within-run jitter)
 
     @property
     def ok(self) -> bool:
         return self.error is None
+
+    @property
+    def latency_cv(self) -> float:
+        """Coefficient of variation of latency (std / p50).
+
+        A normalized measure of run jitter: 0.05 means ±5% spread. Use it to
+        judge whether a latency difference between two candidates is real or
+        within measurement noise.
+        """
+        if self.latency_p50_ms <= 0.0:
+            return 0.0
+        return self.latency_std_ms / self.latency_p50_ms
+
+    @property
+    def stability(self) -> str:
+        """Qualitative measurement quality from the latency CV."""
+        cv = self.latency_cv
+        if cv < 0.05:
+            return "stable"
+        if cv < 0.15:
+            return "noisy"
+        return "unstable"
 
 
 class _TensorRTRunner:
@@ -236,6 +260,7 @@ def _serialize_model(
     input_shape: list[int] | None = None,
     candidate: Any = None,
     model_info: ModelInfo | None = None,
+    input_spec: Any = None,
 ) -> tuple[Any, ...]:
     """Serialize a model to bytes for cross-process transfer.
 
@@ -288,7 +313,9 @@ def _serialize_model(
             return ("stub_module", buf.getvalue(), list(_STUB_REGISTRY))
         return ("module", buf.getvalue())
 
-    if input_shape is not None:
+    # Multi-input models can't be traced with a single dummy; pickle directly.
+    multi_input = input_spec is not None and not input_spec.is_single
+    if input_shape is not None and not multi_input:
         try:
             vocab = getattr(model_info, "vocab_size", None) if model_info is not None else None
             if vocab:
@@ -371,11 +398,13 @@ def _worker(
     warmup_iters: int,
     measure_iters: int,
     calibration_inputs: list[Any] | None,
+    input_spec: Any = None,
 ) -> None:
     try:
         model = _deserialize_model(model_payload)
         result = _run_benchmark(
-            candidate, model, model_info, input_shape, batch_size, warmup_iters, measure_iters, calibration_inputs
+            candidate, model, model_info, input_shape, batch_size, warmup_iters, measure_iters,
+            calibration_inputs, input_spec,
         )
     except Exception as exc:
         result = BenchmarkResult(
@@ -401,15 +430,17 @@ def benchmark_candidate(
     measure_iters: int = _MEASURE_ITERS,
     timeout_s: float | None = 180.0,
     calibration_inputs: list[Any] | None = None,
+    input_spec: Any = None,
 ) -> BenchmarkResult:
     import multiprocessing as mp
 
     if timeout_s is None:
         return _worker_inline(
-            candidate, model, model_info, input_shape, batch_size, warmup_iters, measure_iters, calibration_inputs
+            candidate, model, model_info, input_shape, batch_size, warmup_iters, measure_iters,
+            calibration_inputs, input_spec,
         )
 
-    model_payload = _serialize_model(model, input_shape, candidate, model_info)
+    model_payload = _serialize_model(model, input_shape, candidate, model_info, input_spec)
 
     ctx = mp.get_context("spawn")
     queue: mp.Queue[BenchmarkResult] = ctx.Queue()
@@ -417,7 +448,7 @@ def benchmark_candidate(
         target=_worker,
         args=(
             queue, candidate, model_payload, model_info, input_shape,
-            batch_size, warmup_iters, measure_iters, calibration_inputs,
+            batch_size, warmup_iters, measure_iters, calibration_inputs, input_spec,
         ),
         daemon=True,
     )
@@ -482,10 +513,12 @@ def _worker_inline(
     warmup_iters: int,
     measure_iters: int,
     calibration_inputs: list[Any] | None = None,
+    input_spec: Any = None,
 ) -> BenchmarkResult:
     try:
         return _run_benchmark(
-            candidate, model, model_info, input_shape, batch_size, warmup_iters, measure_iters, calibration_inputs
+            candidate, model, model_info, input_shape, batch_size, warmup_iters, measure_iters,
+            calibration_inputs, input_spec,
         )
     except Exception as exc:
         return BenchmarkResult(
@@ -509,17 +542,19 @@ def _run_benchmark(
     warmup_iters: int,
     measure_iters: int,
     calibration_inputs: list[Any] | None = None,
+    input_spec: Any = None,
 ) -> BenchmarkResult:
     import torch
     device = torch.device(candidate.device)
 
     accuracy_drop: float | None = None
+    accuracy_metric: str | None = None
     if (
         calibration_inputs
         and candidate.backend in _ACCURACY_SENSITIVE_BACKENDS
         and not _is_generative_family(model_info)
     ):
-        accuracy_drop = _measure_accuracy_drop(candidate, model, calibration_inputs)
+        accuracy_drop, accuracy_metric = _measure_accuracy_drop(candidate, model, calibration_inputs, model_info)
     elif (
         calibration_inputs
         and candidate.backend in _ACCURACY_SENSITIVE_BACKENDS
@@ -532,7 +567,7 @@ def _run_benchmark(
             getattr(model_info, "family", None),
         )
 
-    prepared_model, dummy_input, weight_mb = _prepare(candidate, model, input_shape, batch_size, device, calibration_inputs, model_info)
+    prepared_model, dummy_input, weight_mb = _prepare(candidate, model, input_shape, batch_size, device, calibration_inputs, model_info, input_spec)
 
     timings_ms = _time_model(prepared_model, dummy_input, device, warmup_iters, measure_iters)
     memory_mb = _measure_memory(prepared_model, dummy_input, device, weight_mb)
@@ -544,6 +579,9 @@ def _run_benchmark(
     p99 = timings_ms_sorted[int(n * 0.99)]
     throughput = 1000.0 / p50 * batch_size  # req/sec
 
+    mean = sum(timings_ms) / n
+    std = (sum((t - mean) ** 2 for t in timings_ms) / n) ** 0.5
+
     return BenchmarkResult(
         candidate=candidate,
         latency_p50_ms=p50,
@@ -553,30 +591,91 @@ def _run_benchmark(
         memory_mb=memory_mb,
         batch_size=batch_size,
         accuracy_drop=accuracy_drop,
+        accuracy_metric=accuracy_metric,
+        latency_std_ms=std,
     )
 
 
-def _export_to_onnx_bytes(model: Any, dummy: Any) -> bytes:
-    """Export a model to ONNX and return the raw bytes."""
+def _export_to_onnx_bytes(
+    model: Any,
+    dummy: Any,
+    input_names: list[str] | None = None,
+    dynamic_axes: dict[str, dict[int, str]] | None = None,
+) -> bytes:
+    """Export a model to ONNX and return the raw bytes.
+
+    ``dummy`` may be a single tensor or a tuple of tensors (multi-input). When
+    omitted, ``input_names``/``dynamic_axes`` default to the single ``"input"``
+    layout, preserving the original single-tensor behaviour exactly.
+    """
     import io
     import warnings
 
     import torch
+
+    input_names = input_names or ["input"]
+    dynamic_axes = dynamic_axes or {"input": {0: "batch"}, "output": {0: "batch"}}
+    args = _to_cpu(dummy)
 
     buf = io.BytesIO()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         torch.onnx.export(
             model,
-            dummy.to("cpu"),
+            args,
             buf,  # type: ignore[arg-type]
             opset_version=17,
-            input_names=["input"],
+            input_names=input_names,
             output_names=["output"],
-            dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
+            dynamic_axes=dynamic_axes,
             dynamo=False,
         )
     return buf.getvalue()
+
+
+def _is_multi_input(dummy: Any) -> bool:
+    return isinstance(dummy, tuple)
+
+
+def _call_torch(model: Any, dummy: Any) -> Any:
+    """Invoke a torch model with a single tensor or a tuple of tensors."""
+    return model(*dummy) if isinstance(dummy, tuple) else model(dummy)
+
+
+def _to_cpu(dummy: Any) -> Any:
+    if isinstance(dummy, tuple):
+        return tuple(t.to("cpu") for t in dummy)
+    return dummy.to("cpu")
+
+
+def _onnx_feeds(sess: Any, dummy: Any) -> dict[str, Any]:
+    """Map a single tensor / tuple of tensors onto the session's input names."""
+    tensors = dummy if isinstance(dummy, tuple) else (dummy,)
+    names = [i.name for i in sess.get_inputs()]
+    return {n: t.cpu().numpy() for n, t in zip(names, tensors, strict=False)}
+
+
+def _timing_input(
+    calibration_inputs: list[Any] | None,
+    batch_size: int,
+    input_shape: list[int],
+    torch_dtype: Any,
+    device: Any,
+    vocab: int | None,
+) -> Any:
+    """Build the tensor fed to the timing loop (single-input convenience wrapper).
+
+    Prefers a *representative* sample (calibration/eval data) over random noise:
+    data-dependent paths (control flow, sparsity, value ranges) make random
+    inputs an unreliable latency proxy. Delegates to :class:`InputSpec` so the
+    single- and multi-input paths share one implementation.
+    """
+    from infermap.inputspec import InputSpec
+
+    spec = InputSpec.from_shape(input_shape, vocab)
+    return spec.build(
+        batch_size, samples=calibration_inputs, torch_dtype=torch_dtype, device=device, vocab=vocab
+    )
 
 
 def _prepare(
@@ -587,6 +686,7 @@ def _prepare(
     device: Any,
     calibration_inputs: list[Any] | None = None,
     model_info: ModelInfo | None = None,
+    input_spec: Any = None,
 ) -> tuple[Any, Any, float]:
     import copy
     import warnings
@@ -623,11 +723,13 @@ def _prepare(
             )
         m = torch.compile(m)
 
+    from infermap.inputspec import InputSpec
+
     vocab = getattr(model_info, "vocab_size", None) if model_info is not None else None
-    if vocab:
-        dummy = torch.randint(0, vocab, (batch_size, *input_shape), dtype=torch.long, device=device)
-    else:
-        dummy = torch.randn(batch_size, *input_shape, dtype=torch_dtype, device=device)
+    spec = input_spec or InputSpec.from_shape(input_shape, vocab)
+    dummy = spec.build(
+        batch_size, samples=calibration_inputs, torch_dtype=torch_dtype, device=device, vocab=vocab
+    )
 
     # Compute weight memory before quantization/ONNX conversion (quantized tensors
     # and ONNX sessions don't expose parameters in the same way).
@@ -676,13 +778,23 @@ def _prepare(
             # estimate that a sparse storage format could reach.
             weight_mb = weight_mb * max(0.05, 1.0 - report.sparsity)
     elif candidate.backend in ("onnx_cpu", "onnx_cuda", "onnx_coreml"):
-        m, dummy = _prepare_onnx(candidate, m, dummy, device)
+        m, dummy = _prepare_onnx(candidate, m, dummy, device, spec)
     elif candidate.backend == "onnx_int8_cpu":
-        m, dummy = _prepare_onnx_int8(m, dummy)
+        m, dummy = _prepare_onnx_int8(m, dummy, spec)
         weight_mb = weight_mb / 4
     elif candidate.backend in ("tensorrt_fp32", "tensorrt_fp16", "tensorrt_int8"):
+        if not spec.is_single:
+            raise RuntimeError(
+                f"{candidate.backend!r} does not yet support multi-input models "
+                f"({len(spec.tensors)} inputs); use an ONNX or PyTorch backend."
+            )
         m, dummy, weight_mb = _prepare_tensorrt(candidate, m, dummy, calibration_inputs)
     elif candidate.backend in ("openvino_fp32", "openvino_int8"):
+        if not spec.is_single:
+            raise RuntimeError(
+                f"{candidate.backend!r} does not yet support multi-input models "
+                f"({len(spec.tensors)} inputs); use an ONNX or PyTorch backend."
+            )
         m, dummy, weight_mb = _prepare_openvino(candidate, m, dummy, calibration_inputs)
 
     return m, dummy, weight_mb
@@ -691,12 +803,14 @@ def _prepare(
 def _prepare_onnx(
     candidate: DeploymentCandidate,
     model: Any,
-    dummy: torch.Tensor,
+    dummy: Any,
     device: torch.device,
-) -> tuple[Any, torch.Tensor]:
+    spec: Any = None,
+) -> tuple[Any, Any]:
     import onnxruntime as ort
 
-    onnx_bytes = _export_to_onnx_bytes(model, dummy)
+    names, axes = _onnx_export_meta(spec)
+    onnx_bytes = _export_to_onnx_bytes(model, dummy, names, axes)
 
     providers: list[str]
     if candidate.backend == "onnx_cuda":
@@ -707,10 +821,18 @@ def _prepare_onnx(
         providers = ["CPUExecutionProvider"]
 
     sess = ort.InferenceSession(onnx_bytes, providers=providers)
-    return sess, dummy.to("cpu")
+    return sess, _to_cpu(dummy)
 
 
-def _prepare_onnx_int8(model: Any, dummy: torch.Tensor) -> tuple[Any, torch.Tensor]:
+def _onnx_export_meta(spec: Any) -> tuple[list[str] | None, dict[str, dict[int, str]] | None]:
+    """Input names + dynamic axes for ONNX export; (None, None) keeps the
+    single-input default ("input"/"output")."""
+    if spec is None or spec.is_single:
+        return None, None
+    return spec.names, spec.dynamic_axes()
+
+
+def _prepare_onnx_int8(model: Any, dummy: Any, spec: Any = None) -> tuple[Any, Any]:
     import logging
     import tempfile
     import warnings
@@ -719,7 +841,8 @@ def _prepare_onnx_int8(model: Any, dummy: torch.Tensor) -> tuple[Any, torch.Tens
     import onnxruntime as ort
     from onnxruntime.quantization import QuantType, quantize_dynamic
 
-    onnx_bytes = _export_to_onnx_bytes(model, dummy)
+    names, axes = _onnx_export_meta(spec)
+    onnx_bytes = _export_to_onnx_bytes(model, dummy, names, axes)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         onnx_path = _Path(tmpdir) / "model.onnx"
@@ -743,7 +866,7 @@ def _prepare_onnx_int8(model: Any, dummy: torch.Tensor) -> tuple[Any, torch.Tens
         # InferenceSession loads model into memory, so tmpdir can be deleted after.
         sess = ort.InferenceSession(str(quant_path), providers=["CPUExecutionProvider"])
 
-    return sess, dummy.to("cpu")
+    return sess, _to_cpu(dummy)
 
 
 def _make_trt_calibrator(calibration_inputs: list[Any]) -> Any:
@@ -864,10 +987,14 @@ def _measure_accuracy_drop(
     candidate: DeploymentCandidate,
     model: Any,
     calibration_inputs: list[Any],
-) -> float | None:
-    """Return mean cosine-similarity drop between FP32 and quantized outputs.
+    model_info: ModelInfo | None = None,
+) -> tuple[float | None, str]:
+    """Return (metric_value, metric_name) comparing FP32 and optimized model outputs.
 
-    0.0 = outputs identical, 1.0 = outputs orthogonal. Returns None on any failure.
+    Metric depends on model family:
+      CNN / classification: mean KL divergence (nats) between softmax distributions.
+      Transformer encoder / unknown: cosine distance (1 - cosine_similarity).
+    Returns (None, metric_name) on any failure.
     """
     import copy
     import warnings
@@ -875,12 +1002,22 @@ def _measure_accuracy_drop(
     import torch
     import torch.nn.functional as F
 
+    family = (getattr(model_info, "family", None) or "").lower() if model_info is not None else ""
+    use_kl = family == "cnn"
+    metric_name = "kl_divergence_nats" if use_kl else "cosine_distance"
+
+    def _cast(inp: Any) -> Any:
+        if not isinstance(inp, torch.Tensor):
+            return inp
+        vocab = getattr(model_info, "vocab_size", None) if model_info is not None else None
+        return inp.long().cpu() if vocab else inp.float().cpu()
+
     try:
         fp32_model = copy.deepcopy(model).cpu().eval()
         fp32_outs: list[Any] = []
         with torch.no_grad():
             for inp in calibration_inputs:
-                out = fp32_model(inp.float().cpu())
+                out = fp32_model(_cast(inp))
                 fp32_outs.append(out.detach().flatten().float())
 
         quant_outs: list[Any] = []
@@ -890,7 +1027,7 @@ def _measure_accuracy_drop(
             quant_model = _safe_quantize_dynamic(copy.deepcopy(model).cpu().eval())
             with torch.no_grad():
                 for inp in calibration_inputs:
-                    out = quant_model(inp.float().cpu())
+                    out = quant_model(_cast(inp))
                     quant_outs.append(out.detach().flatten().float())
 
         elif candidate.backend == "onnx_int8_cpu":
@@ -934,31 +1071,29 @@ def _measure_accuracy_drop(
                 half_model = copy.deepcopy(model).cpu().to(torch_dtype).eval()
                 with torch.no_grad():
                     for inp in calibration_inputs:
-                        out = half_model(inp.float().cpu().to(torch_dtype))
+                        out = half_model(_cast(inp))
                         quant_outs.append(out.detach().flatten().float())
             except Exception as exc:
                 logger.info("accuracy proxy (%s) failed: %s", candidate.backend, exc)
-                return None
+                return None, metric_name
 
         elif candidate.backend == "tensorrt_fp16":
-            # Use pytorch_fp16 as a proxy — same numerical precision reduction.
             try:
                 half_model = copy.deepcopy(model).cpu().to(torch.float16).eval()
                 with torch.no_grad():
                     for inp in calibration_inputs:
-                        out = half_model(inp.float().cpu().to(torch.float16))
+                        out = half_model(_cast(inp))
                         quant_outs.append(out.detach().flatten().float())
             except Exception as exc:
                 logger.info("tensorrt_fp16 accuracy proxy failed: %s", exc)
-                return None
+                return None, metric_name
 
         elif candidate.backend in ("tensorrt_int8", "openvino_int8"):
-            # Use pytorch_int8_dynamic as a proxy for quantization accuracy impact.
             _ensure_quantization_engine()
             quant_model = _safe_quantize_dynamic(copy.deepcopy(model).cpu().eval())
             with torch.no_grad():
                 for inp in calibration_inputs:
-                    out = quant_model(inp.float().cpu())
+                    out = quant_model(_cast(inp))
                     quant_outs.append(out.detach().flatten().float())
 
         elif _is_pruning_backend(candidate.backend):
@@ -968,27 +1103,33 @@ def _measure_accuracy_drop(
                 pruned, _report = prune_model(pruned, spec_for_backend(candidate.backend))
                 with torch.no_grad():
                     for inp in calibration_inputs:
-                        out = pruned(inp.float().cpu())
+                        out = pruned(_cast(inp))
                         quant_outs.append(out.detach().flatten().float())
             except Exception as exc:
                 logger.info("pruning accuracy proxy (%s) failed: %s", candidate.backend, exc)
-                return None
+                return None, metric_name
 
         if not quant_outs:
-            return None
+            return None, metric_name
 
         drops = []
         for fp32_out, quant_out in zip(fp32_outs, quant_outs, strict=False):
             if fp32_out.numel() == 0:
                 continue
-            sim = F.cosine_similarity(fp32_out.unsqueeze(0), quant_out.unsqueeze(0)).item()
-            drops.append(1.0 - max(-1.0, min(1.0, sim)))
+            if use_kl:
+                p = F.softmax(fp32_out, dim=0)
+                q = F.softmax(quant_out, dim=0)
+                kl = F.kl_div(q.log().clamp(min=-100.0), p, reduction="sum").item()
+                drops.append(max(0.0, kl))
+            else:
+                sim = F.cosine_similarity(fp32_out.unsqueeze(0), quant_out.unsqueeze(0)).item()
+                drops.append(1.0 - max(-1.0, min(1.0, sim)))
 
-        return sum(drops) / len(drops) if drops else None
+        return (sum(drops) / len(drops) if drops else None), metric_name
 
     except Exception as exc:
         logger.warning("accuracy-drop measurement failed for %s: %s", candidate.backend, exc)
-        return None
+        return None, metric_name
 
 
 def _time_model(
@@ -1002,13 +1143,14 @@ def _time_model(
     import torch
 
     is_onnx = isinstance(model, ort.InferenceSession)
+    onnx_feeds = _onnx_feeds(model, dummy) if is_onnx else None
 
     def run() -> None:
         if is_onnx:
-            model.run(None, {"input": dummy.numpy()})
+            model.run(None, onnx_feeds)
         else:
             with torch.no_grad():
-                model(dummy)
+                _call_torch(model, dummy)
 
     def sync() -> None:
         if device.type == "cuda":
@@ -1059,7 +1201,7 @@ def _measure_memory(
         # CUDA tracks peak allocation precisely — includes weights + activations.
         torch.cuda.reset_peak_memory_stats(device)
         with torch.no_grad():
-            model(dummy)
+            _call_torch(model, dummy)
         torch.cuda.synchronize()
         return torch.cuda.max_memory_allocated(device) / 1e6
 
@@ -1068,7 +1210,7 @@ def _measure_memory(
         torch.mps.synchronize()
         before = torch.mps.current_allocated_memory()
         with torch.no_grad():
-            model(dummy)
+            _call_torch(model, dummy)
         torch.mps.synchronize()
         after = torch.mps.current_allocated_memory()
         activation_mb = max(0.0, (after - before) / 1e6)
@@ -1076,8 +1218,8 @@ def _measure_memory(
 
     # CPU / ONNX: weight bytes are exact; activations are small for batch_size=1.
     if isinstance(model, ort.InferenceSession):
-        model.run(None, {"input": dummy.numpy()})
+        model.run(None, _onnx_feeds(model, dummy))
     else:
         with torch.no_grad():
-            model(dummy)
+            _call_torch(model, dummy)
     return weight_mb

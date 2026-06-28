@@ -234,3 +234,5 @@ infer.py
 resnet18.pt
 *.pth
 deployment.yaml
+graphify-out/*
+CLAUDE.md

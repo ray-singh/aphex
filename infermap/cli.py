@@ -109,7 +109,9 @@ def preflight(
 def benchmark(
     model_path: Path = typer.Argument(..., help="Path to a saved PyTorch model"),
     input_shape: str = typer.Option(
-        "3,224,224", "--input-shape", help="Input tensor shape (no batch dim), e.g. 3,224,224"
+        "3,224,224", "--input-shape",
+        help="Input tensor shape (no batch dim), e.g. 3,224,224. "
+             "Multi-input: 'input_ids:128:long;attention_mask:128:long'.",
     ),
     batch_sizes: str = typer.Option("1,2,4,8", "--batch-sizes", help="Comma-separated batch sizes to sweep, e.g. 1,2,4,8"),
     warmup: int = typer.Option(10, help="Warm-up iterations"),
@@ -149,7 +151,8 @@ def benchmark(
     from infermap.profiler import profile_hardware
     from infermap.registry import get_plugin
 
-    shape = _parse_shape(input_shape)
+    input_spec = _parse_input_spec(input_shape)
+    shape = input_spec.primary_shape
     bs_list = _parse_batch_sizes(batch_sizes)
     timeout_s = timeout if timeout > 0 else None
     json_mode = format_ == "json"
@@ -188,7 +191,7 @@ def benchmark(
     calib = _resolve_calibration(calibration_data, shape, eval_dataset)
     candidates = plugin.generate_candidates(info, hw)
     candidates, cost_estimates = _prune_with_cost_model(candidates, info, hw, bs_list[0], json_mode)
-    results = _run_candidates(plugin, candidates, model, info, shape, bs_list, warmup, iters, timeout_s, calib, json_mode=json_mode, jobs=jobs)
+    results = _run_candidates(plugin, candidates, model, info, shape, bs_list, warmup, iters, timeout_s, calib, json_mode=json_mode, jobs=jobs, input_spec=input_spec)
     if eval_dataset is not None:
         _run_eval(eval_dataset, fn, json_mode, results=results, model=model, info=info)
     if json_mode:
@@ -279,7 +282,8 @@ def optimize(
     from infermap.recommender import recommend
     from infermap.registry import get_plugin
 
-    shape = _parse_shape(input_shape)
+    input_spec = _parse_input_spec(input_shape)
+    shape = input_spec.primary_shape
     bs_list = _parse_batch_sizes(batch_sizes)
     timeout_s = timeout if timeout > 0 else None
     json_mode = format_ == "json"
@@ -375,7 +379,7 @@ def optimize(
     calib = _resolve_calibration(calibration_data, shape, eval_dataset)
     candidates = plugin.generate_candidates(info, hw)
     candidates = _select_with_fingerprint(candidates, info, hw, json_mode)
-    results = _run_candidates(plugin, candidates, model, info, shape, bs_list, 10, 100, timeout_s, calib, json_mode=json_mode, jobs=jobs)
+    results = _run_candidates(plugin, candidates, model, info, shape, bs_list, 10, 100, timeout_s, calib, json_mode=json_mode, jobs=jobs, input_spec=input_spec)
     eval_result = _run_eval(eval_dataset, fn, json_mode, results=results, model=model, info=info) if eval_dataset is not None else None
 
     rec = recommend(
@@ -462,7 +466,8 @@ def convert(
     ),
     input_shape: str | None = typer.Option(
         None, "--input-shape",
-        help="Input tensor shape (no batch dim), e.g. 3,224,224. Required unless --from-config is used.",
+        help="Input tensor shape (no batch dim), e.g. 3,224,224. Multi-input: "
+             "'input_ids:128:long;attention_mask:128:long'. Required unless --from-config is used.",
     ),
     output: Path | None = typer.Option(
         None, "--output",
@@ -475,6 +480,11 @@ def convert(
     calibration_data: Path | None = typer.Option(
         None, "--calibration-data",
         help="Calibration inputs (.pt file or image dir) required for int8 backends.",
+    ),
+    verify: bool = typer.Option(
+        True, "--verify/--no-verify",
+        help="After conversion, check the artifact reproduces the source model's "
+             "outputs. Exits non-zero on a parity failure.",
     ),
 ) -> None:
     """Convert a model to its recommended deployment format.
@@ -537,11 +547,8 @@ def convert(
         )
         raise typer.Exit(code=1)
 
-    try:
-        shape = [int(x) for x in resolved_shape_str.split(",")]
-    except ValueError:
-        err_console.print(f"Invalid input shape: {resolved_shape_str!r}. Expected comma-separated ints.")
-        raise typer.Exit(code=1)
+    input_spec = _parse_input_spec(resolved_shape_str)
+    shape = input_spec.primary_shape
 
     out_path = output or default_output_path(model_path, resolved_backend)
 
@@ -559,7 +566,7 @@ def convert(
     )
     try:
         with console.status(f"[bold green]Building {resolved_backend}..."):
-            written = _convert(model, resolved_backend, shape, out_path, calib)
+            written = _convert(model, resolved_backend, shape, out_path, calib, input_spec)
     except Exception as exc:
         err_console.print(f"Conversion failed: {exc}")
         raise typer.Exit(code=1)
@@ -569,6 +576,29 @@ def convert(
         size_mb = p.stat().st_size / 1e6
         console.print(f"  [green]✓[/green]  {p}  [dim]({size_mb:.1f} MB)[/dim]")
     console.print()
+
+    if verify:
+        from infermap.parity import verify_artifact
+
+        with console.status("[bold green]Verifying artifact parity..."):
+            result = verify_artifact(
+                model, resolved_backend, written, shape, sample_inputs=calib,
+                input_spec=input_spec,
+            )
+
+        if result.skipped:
+            console.print(f"  [dim]parity check skipped — {result.reason}[/dim]")
+        elif result.passed:
+            console.print(f"  [green]✓[/green]  {result.summary()}")
+        else:
+            err_console.print(f"  ✗  {result.summary()}")
+            err_console.print(
+                f"     Artifact outputs diverge from the source model beyond tolerance "
+                f"(cosine ≥ {result.cosine_threshold}). The conversion is likely broken; "
+                f"do not deploy this artifact."
+            )
+            raise typer.Exit(code=1)
+        console.print()
 
 
 # ---------------------------------------------------------------------------
@@ -1266,6 +1296,27 @@ def _gate_jobs(jobs: int, candidates: list, json_mode: bool) -> int:
     return 1
 
 
+def _parse_input_spec(s: str) -> Any:
+    """Parse --input-shape into an InputSpec (single or multi-input).
+
+    Single: '3,224,224'. Multi: 'input_ids:128:long;attention_mask:128:long'.
+    """
+    from infermap.inputspec import InputSpec
+
+    try:
+        spec = InputSpec.parse(s)
+    except ValueError as exc:
+        err_console.print(f"Invalid --input-shape {s!r}: {exc}")
+        raise typer.Exit(code=1)
+    for ts in spec.tensors:
+        if not ts.shape or any(d <= 0 for d in ts.shape):
+            err_console.print(
+                f"Invalid --input-shape {s!r}: all dimensions must be positive integers."
+            )
+            raise typer.Exit(code=1)
+    return spec
+
+
 def _parse_shape(s: str) -> list[int]:
     """Parse a comma-separated input shape, e.g. '3,224,224' → [3,224,224]."""
     try:
@@ -1508,6 +1559,7 @@ def _run_candidates(
     calibration_inputs: list | None = None,
     json_mode: bool = False,
     jobs: int = 1,
+    input_spec: object = None,
 ) -> list:
     from infermap.candidates import DeploymentCandidate
     from infermap.inspector import ModelInfo
@@ -1527,7 +1579,7 @@ def _run_candidates(
         return _plugin.benchmark(
             _ensure_type(cand, DeploymentCandidate, "cand"),
             model, _model_info, shape, bs, warmup, iters,
-            timeout_s, calibration_inputs,
+            timeout_s, calibration_inputs, input_spec,
         )
 
     if json_mode:
@@ -1616,6 +1668,9 @@ def _result_to_dict(r: object) -> dict:
         "latency_p50_ms": _r.latency_p50_ms if _r.ok else None,
         "latency_p95_ms": _r.latency_p95_ms if _r.ok else None,
         "latency_p99_ms": _r.latency_p99_ms if _r.ok else None,
+        "latency_std_ms": _r.latency_std_ms if _r.ok else None,
+        "latency_cv": _r.latency_cv if _r.ok else None,
+        "stability": _r.stability if _r.ok else None,
         "throughput_rps": _r.throughput_rps if _r.ok else None,
         "memory_mb": _r.memory_mb if _r.ok else None,
         "accuracy_drop": _r.accuracy_drop,
@@ -1632,6 +1687,7 @@ def _build_metrics_payload(results: list, recommendation: object = None) -> dict
         payload["recommendation"] = {
             **_result_to_dict(r),
             "rationale": _rec.rationale,
+            "notes": _rec.notes or [],
             "pareto_frontier_count": len(_rec.pareto_frontier),
         }
     return payload
@@ -1906,11 +1962,17 @@ def _print_recommendation(rec: object, eval_result: tuple | None = None) -> None
         else ""
     )
 
+    notes_block = ""
+    if rec.notes:
+        lines = "\n".join(f"  ⚠ {note}" for note in rec.notes)
+        notes_block = f"\n\n[yellow]{lines}[/yellow]"
+
     body = (
         f"[bold white]{r.candidate.description}[/bold white]\n\n"
         f"{stats}\n"
         f"[dim]{rec.rationale}[/dim]"
         f"{frontier_note}"
+        f"{notes_block}"
     )
 
     console.print()
