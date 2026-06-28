@@ -1,9 +1,9 @@
-"""Tests for infermap.selector — candidate selector."""
+"""Tests for aphex.selector — candidate selector."""
 from __future__ import annotations
 
-from infermap.candidates import generate_candidates
-from infermap.inspector import ModelInfo
-from infermap.selector import select_candidates
+from aphex.candidates import generate_candidates
+from aphex.inspector import ModelInfo
+from aphex.selector import select_candidates
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -20,7 +20,7 @@ def _info(family: str = "cnn", params: int = 5_000_000) -> ModelInfo:
 
 
 def _cuda_hw(bf16: bool = False):
-    from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
+    from aphex.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
     return HardwareProfile(
         cpu=CPUProfile(name="Intel Xeon", physical_cores=8, logical_cores=16, ram_gb=32.0),
         accelerator=AcceleratorProfile(
@@ -37,7 +37,7 @@ def _cuda_hw(bf16: bool = False):
 
 
 def _mps_hw():
-    from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
+    from aphex.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
     return HardwareProfile(
         cpu=CPUProfile(name="Apple M2", physical_cores=10, logical_cores=10, ram_gb=16.0),
         accelerator=AcceleratorProfile(
@@ -54,7 +54,7 @@ def _mps_hw():
 
 
 def _cpu_hw():
-    from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
+    from aphex.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
     return HardwareProfile(
         cpu=CPUProfile(name="Intel Xeon", physical_cores=8, logical_cores=16, ram_gb=32.0),
         accelerator=AcceleratorProfile(

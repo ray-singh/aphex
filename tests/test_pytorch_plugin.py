@@ -6,10 +6,10 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from infermap.benchmark import BenchmarkResult
-from infermap.candidates import DeploymentCandidate
-from infermap.plugins.pytorch import _PYTORCH_EXTENSIONS, PytorchPlugin
-from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
+from aphex.benchmark import BenchmarkResult
+from aphex.candidates import DeploymentCandidate
+from aphex.plugins.pytorch import _PYTORCH_EXTENSIONS, PytorchPlugin
+from aphex.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
 
 
 def _tiny_model() -> nn.Module:

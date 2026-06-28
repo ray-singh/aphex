@@ -1,10 +1,10 @@
-"""Tests for infermap.cloud.instances — cloud instance hardware profiles."""
+"""Tests for aphex.cloud.instances — cloud instance hardware profiles."""
 from __future__ import annotations
 
 import pytest
 
-from infermap.cloud.instances import get_instance_profile, list_targets
-from infermap.profiler import HardwareProfile
+from aphex.cloud.instances import get_instance_profile, list_targets
+from aphex.profiler import HardwareProfile
 
 # ── get_instance_profile: known instances ─────────────────────────────────────
 

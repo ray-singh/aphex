@@ -10,11 +10,11 @@ import pytest
 import torch
 import torch.nn as nn
 
-from infermap.benchmark import benchmark_candidate
-from infermap.candidates import generate_candidates
-from infermap.inspector import inspect_model
-from infermap.profiler import profile_hardware
-from infermap.recommender import recommend
+from aphex.benchmark import benchmark_candidate
+from aphex.candidates import generate_candidates
+from aphex.inspector import inspect_model
+from aphex.profiler import profile_hardware
+from aphex.recommender import recommend
 
 pytestmark = pytest.mark.integration
 

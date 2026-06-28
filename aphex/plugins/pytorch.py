@@ -1,0 +1,64 @@
+"""PyTorch plugin — handles .pt / .pth / .pkl files and nn.Module instances."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from aphex.benchmark import BenchmarkResult
+from aphex.candidates import DeploymentCandidate
+from aphex.inspector import ModelInfo
+from aphex.plugin import ModelPlugin
+from aphex.profiler import HardwareProfile
+
+_PYTORCH_EXTENSIONS = {".pt", ".pth", ".pkl"}
+
+
+class PytorchPlugin(ModelPlugin):
+    name = "pytorch"
+
+    def can_handle(self, path_or_model: Any) -> bool:
+        try:
+            import torch.nn as nn
+            if isinstance(path_or_model, nn.Module):
+                return True
+        except ImportError:
+            pass
+        if isinstance(path_or_model, (str, Path)):
+            return Path(path_or_model).suffix.lower() in _PYTORCH_EXTENSIONS
+        return False
+
+    def inspect(self, path_or_model: Any, input_shape: list[int] | None = None) -> ModelInfo:
+        from aphex.inspector import inspect_model
+        return inspect_model(path_or_model, input_shape)
+
+    def load(self, path: Path) -> Any:
+        from aphex.inspector import _load_model
+        model = _load_model(Path(path))
+        model.eval()
+        return model
+
+    def generate_candidates(
+        self, info: ModelInfo, hardware: HardwareProfile
+    ) -> list[DeploymentCandidate]:
+        from aphex.candidates import generate_candidates
+        return generate_candidates(info, hardware)
+
+    def benchmark(
+        self,
+        candidate: DeploymentCandidate,
+        model: Any,
+        info: ModelInfo,
+        input_shape: list[int],
+        batch_size: int,
+        warmup_iters: int,
+        measure_iters: int,
+        timeout_s: float | None,
+        calibration_inputs: list[Any] | None,
+        input_spec: Any = None,
+    ) -> BenchmarkResult:
+        from aphex.benchmark import benchmark_candidate
+        return benchmark_candidate(
+            candidate, model, info, input_shape, batch_size,
+            warmup_iters, measure_iters, timeout_s, calibration_inputs, input_spec,
+        )

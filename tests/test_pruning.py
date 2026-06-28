@@ -8,12 +8,12 @@ import pytest
 import torch
 import torch.nn as nn
 
-from infermap.benchmark import BenchmarkResult, _is_pruning_backend
-from infermap.candidates import DeploymentCandidate
-from infermap.evaluator import _PYTORCH_EVAL_BACKENDS, EvalDataset, fill_accuracy_drop
-from infermap.inspector import ModelInfo
-from infermap.plugins.pytorch import PytorchPlugin
-from infermap.pruning import (
+from aphex.benchmark import BenchmarkResult, _is_pruning_backend
+from aphex.candidates import DeploymentCandidate
+from aphex.evaluator import _PYTORCH_EVAL_BACKENDS, EvalDataset, fill_accuracy_drop
+from aphex.inspector import ModelInfo
+from aphex.plugins.pytorch import PytorchPlugin
+from aphex.pruning import (
     PRUNING_BACKENDS,
     PruneSpec,
     is_pruning_backend,
@@ -217,8 +217,8 @@ def test_fill_accuracy_drop_records_drop_for_pruning() -> None:
 
 def test_candidate_generator_emits_pruning_backends() -> None:
     """generate_candidates must include the pruning family on every device path."""
-    from infermap.candidates import _cpu_candidates, _cuda_candidates, _mps_candidates
-    from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
+    from aphex.candidates import _cpu_candidates, _cuda_candidates, _mps_candidates
+    from aphex.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
 
     backends_cpu = {c.backend for c in _cpu_candidates()}
     assert "pytorch_prune_unstructured_50" in backends_cpu

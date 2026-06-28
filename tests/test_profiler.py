@@ -1,6 +1,6 @@
 """Tests for hardware profiler."""
 
-from infermap.profiler import HardwareProfile, profile_hardware
+from aphex.profiler import HardwareProfile, profile_hardware
 
 
 def test_profile_returns_hardware_profile() -> None:

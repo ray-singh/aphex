@@ -1,9 +1,9 @@
 """Tests for candidate generation."""
 
 
-from infermap.candidates import generate_candidates
-from infermap.inspector import ModelInfo
-from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
+from aphex.candidates import generate_candidates
+from aphex.inspector import ModelInfo
+from aphex.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
 
 
 def _make_model() -> ModelInfo:

@@ -11,21 +11,21 @@ import pytest
 import torch
 import torch.nn as nn
 
-from infermap.benchmark import (
+from aphex.benchmark import (
     _dp_world_size,
     _is_dp_backend,
     _is_pruning_backend,
 )
-from infermap.candidates import (
+from aphex.candidates import (
     DeploymentCandidate,
     _cuda_candidates,
     _data_parallel_candidates,
     _mps_candidates,
     generate_candidates,
 )
-from infermap.inspector import ModelInfo
-from infermap.plugins.pytorch import PytorchPlugin
-from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
+from aphex.inspector import ModelInfo
+from aphex.plugins.pytorch import PytorchPlugin
+from aphex.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
 
 
 def _hw(*, kind: str = "cuda", device_count: int = 1, bf16: bool = True) -> HardwareProfile:

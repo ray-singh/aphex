@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import pytest
 
-from infermap.benchmark import BenchmarkResult
-from infermap.candidates import DeploymentCandidate
-from infermap.inspector import ModelInfo
-from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
-from infermap.recommender import Recommendation
-from infermap.system_recommender import (
+from aphex.benchmark import BenchmarkResult
+from aphex.candidates import DeploymentCandidate
+from aphex.inspector import ModelInfo
+from aphex.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
+from aphex.recommender import Recommendation
+from aphex.system_recommender import (
     SystemConfig,
     _has_fp8_support,
     _kv_cache_fraction,

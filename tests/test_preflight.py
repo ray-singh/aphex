@@ -1,9 +1,9 @@
 """Tests for pre-flight validator."""
 
 
-from infermap.inspector import ModelInfo
-from infermap.preflight import run_preflight
-from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
+from aphex.inspector import ModelInfo
+from aphex.preflight import run_preflight
+from aphex.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
 
 
 def _make_model(params: int = 1_000_000) -> ModelInfo:

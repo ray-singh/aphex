@@ -1,4 +1,4 @@
-"""Tests for infermap.parity — artifact-vs-source numerical parity checks."""
+"""Tests for aphex.parity — artifact-vs-source numerical parity checks."""
 from __future__ import annotations
 
 import importlib.util
@@ -8,8 +8,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from infermap.converter import convert
-from infermap.parity import ParityResult, verify_artifact
+from aphex.converter import convert
+from aphex.parity import ParityResult, verify_artifact
 
 _HAS_ONNX = importlib.util.find_spec("onnxruntime") is not None
 _INPUT_SHAPE = [4]
@@ -159,7 +159,7 @@ class _TwoInput(nn.Module):
 
 @pytest.mark.skipif(not _HAS_ONNX, reason="onnxruntime not installed")
 def test_multi_input_onnx_parity_passes(tmp_path: Path) -> None:
-    from infermap.inputspec import InputSpec
+    from aphex.inputspec import InputSpec
 
     model = _TwoInput().eval()
     spec = InputSpec.parse("x:4;y:6")
@@ -171,7 +171,7 @@ def test_multi_input_onnx_parity_passes(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(not _HAS_ONNX, reason="onnxruntime not installed")
 def test_multi_input_onnx_detects_corruption(tmp_path: Path) -> None:
-    from infermap.inputspec import InputSpec
+    from aphex.inputspec import InputSpec
 
     source = _TwoInput().eval()
     bad = _TwoInput().eval()
@@ -184,7 +184,7 @@ def test_multi_input_onnx_detects_corruption(tmp_path: Path) -> None:
 
 
 def test_multi_input_pytorch_parity_passes(tmp_path: Path) -> None:
-    from infermap.inputspec import InputSpec
+    from aphex.inputspec import InputSpec
 
     model = _TwoInput().eval()
     spec = InputSpec.parse("x:4;y:6")

@@ -6,12 +6,12 @@ import pytest
 import torch
 import torch.nn as nn
 
-from infermap.benchmark import benchmark_candidate
-from infermap.candidates import generate_candidates
-from infermap.inspector import inspect_model
-from infermap.preflight import run_preflight
-from infermap.profiler import profile_hardware
-from infermap.recommender import recommend
+from aphex.benchmark import benchmark_candidate
+from aphex.candidates import generate_candidates
+from aphex.inspector import inspect_model
+from aphex.preflight import run_preflight
+from aphex.profiler import profile_hardware
+from aphex.recommender import recommend
 
 
 class TinyCNN(nn.Module):
@@ -112,7 +112,7 @@ def test_pipeline_respects_latency_constraint(saved_model_path: Path) -> None:
 
 def test_preflight_on_huge_model_returns_impossible() -> None:
     """Preflight should block models that can't possibly fit on the current hardware."""
-    from infermap.inspector import ModelInfo
+    from aphex.inspector import ModelInfo
 
     hw = profile_hardware()
     # 500B params at FP32 = ~2.4 TB — impossible on any local device

@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from infermap.deployment import DeploymentConfig
-from infermap.serving import SUPPORTED_FRAMEWORKS, generate_serving_config
-from infermap.serving.bentoml import BentoMLGenerator
-from infermap.serving.fastapi import FastAPIGenerator
-from infermap.serving.torchserve import TorchServeGenerator
-from infermap.serving.triton import TritonGenerator, _instance_kind, _triton_backend
+from aphex.deployment import DeploymentConfig
+from aphex.serving import SUPPORTED_FRAMEWORKS, generate_serving_config
+from aphex.serving.bentoml import BentoMLGenerator
+from aphex.serving.fastapi import FastAPIGenerator
+from aphex.serving.torchserve import TorchServeGenerator
+from aphex.serving.triton import TritonGenerator, _instance_kind, _triton_backend
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -21,7 +21,7 @@ def _config(
     backend: str = "tensorrt_fp16",
     dtype: str = "fp16",
     device: str = "cuda",
-    model_path: str = "/models/resnet50.pt",
+    model_path: str | None = "/models/resnet50.pt",
     batch_size: int = 4,
 ) -> DeploymentConfig:
     return DeploymentConfig(
@@ -169,7 +169,7 @@ def test_triton_no_dynamic_batching_by_default(tmp_path: Path) -> None:
 
 
 def test_triton_dynamic_batching_when_system_config_set(tmp_path: Path) -> None:
-    from infermap.system_recommender import SystemConfig
+    from aphex.system_recommender import SystemConfig
     cfg = _config()
     cfg.system = SystemConfig(
         max_safe_batch_size=32,
@@ -189,7 +189,7 @@ def test_triton_dynamic_batching_when_system_config_set(tmp_path: Path) -> None:
 
 
 def test_triton_max_batch_from_system_config(tmp_path: Path) -> None:
-    from infermap.system_recommender import SystemConfig
+    from aphex.system_recommender import SystemConfig
     cfg = _config(batch_size=4)
     cfg.system = SystemConfig(
         max_safe_batch_size=64,
@@ -315,3 +315,30 @@ def test_fastapi_app_mentions_dtype_and_device(tmp_path: Path) -> None:
     content = (tmp_path / "app.py").read_text()
     assert "int8" in content
     assert "cuda" in content
+
+
+# ── _model_name fallback (model_path=None) ────────────────────────────────────
+
+def test_triton_default_name_when_model_path_none(tmp_path: Path) -> None:
+    TritonGenerator().generate(_config(model_path=None), tmp_path)
+    content = (tmp_path / "config.pbtxt").read_text()
+    assert 'name: "model"' in content
+
+
+def test_torchserve_default_name_when_model_path_none(tmp_path: Path) -> None:
+    TorchServeGenerator().generate(_config(model_path=None), tmp_path)
+    content = (tmp_path / "serve.sh").read_text()
+    assert '"model"' in content
+    assert "model.pt" in content
+
+
+def test_bentoml_default_name_when_model_path_none(tmp_path: Path) -> None:
+    BentoMLGenerator().generate(_config(model_path=None), tmp_path)
+    content = (tmp_path / "service.py").read_text()
+    assert '"model:latest"' in content
+
+
+def test_fastapi_default_name_when_model_path_none(tmp_path: Path) -> None:
+    FastAPIGenerator().generate(_config(model_path=None), tmp_path)
+    content = (tmp_path / "app.py").read_text()
+    assert "load model from" in content

@@ -1,4 +1,4 @@
-"""Tests for infermap.converter — model conversion to deployment formats."""
+"""Tests for aphex.converter — model conversion to deployment formats."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,7 +7,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from infermap.converter import (
+from aphex.converter import (
     _ONNX_BACKENDS,
     _OV_BACKENDS,
     _PYTORCH_BACKENDS,
@@ -479,7 +479,7 @@ def test_convert_multi_input_onnx_names_inputs(tmp_path: Path) -> None:
     pytest.importorskip("onnxruntime")
     import onnxruntime as ort
 
-    from infermap.inputspec import InputSpec
+    from aphex.inputspec import InputSpec
 
     spec = InputSpec.parse("x:4;y:6")
     out = tmp_path / "multi.onnx"
@@ -489,7 +489,7 @@ def test_convert_multi_input_onnx_names_inputs(tmp_path: Path) -> None:
 
 
 def test_convert_multi_input_tensorrt_raises(tmp_path: Path) -> None:
-    from infermap.inputspec import InputSpec
+    from aphex.inputspec import InputSpec
 
     spec = InputSpec.parse("x:4;y:6")
     with pytest.raises(RuntimeError, match="multi-input"):
@@ -498,7 +498,7 @@ def test_convert_multi_input_tensorrt_raises(tmp_path: Path) -> None:
 
 
 def test_convert_multi_input_openvino_raises(tmp_path: Path) -> None:
-    from infermap.inputspec import InputSpec
+    from aphex.inputspec import InputSpec
 
     spec = InputSpec.parse("x:4;y:6")
     with pytest.raises(RuntimeError, match="multi-input"):

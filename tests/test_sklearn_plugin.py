@@ -9,16 +9,16 @@ import pytest
 
 pytest.importorskip("sklearn")
 
-from infermap.benchmark import BenchmarkResult
-from infermap.candidates import DeploymentCandidate
-from infermap.plugins.sklearn import (
+from aphex.benchmark import BenchmarkResult
+from aphex.candidates import DeploymentCandidate
+from aphex.plugins.sklearn import (
     SklearnPlugin,
     _detect_family,
     _detect_framework,
     _get_n_features,
     _is_traditional_ml,
 )
-from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
+from aphex.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
 
 
 def _hw() -> HardwareProfile:

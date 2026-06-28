@@ -9,10 +9,10 @@ from unittest.mock import patch
 
 import pytest
 
-from infermap.benchmark import BenchmarkResult
-from infermap.candidates import DeploymentCandidate
-from infermap.inspector import ModelInfo
-from infermap.plugins.llm import (
+from aphex.benchmark import BenchmarkResult
+from aphex.candidates import DeploymentCandidate
+from aphex.inspector import ModelInfo
+from aphex.plugins.llm import (
     _LLM_MEASURE_CAP,
     _LLM_WARMUP_CAP,
     LLMPlugin,
@@ -22,7 +22,7 @@ from infermap.plugins.llm import (
     _make_result,
     _read_gguf_metadata,
 )
-from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
+from aphex.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -328,7 +328,7 @@ def test_benchmark_caps_warmup_and_measure_iters() -> None:
             throughput_rps=10.0, memory_mb=100.0, batch_size=1,
         )
 
-    with patch("infermap.plugins.llm._benchmark_llm", side_effect=_fake_benchmark):
+    with patch("aphex.plugins.llm._benchmark_llm", side_effect=_fake_benchmark):
         plugin.benchmark(
             candidate=candidate,
             model=Path("/tmp/fake.gguf"),  # noqa: S108
@@ -361,7 +361,7 @@ def test_benchmark_does_not_exceed_cap_when_iters_below_cap() -> None:
             throughput_rps=1.0, memory_mb=0.0, batch_size=1,
         )
 
-    with patch("infermap.plugins.llm._benchmark_llm", side_effect=_fake_benchmark):
+    with patch("aphex.plugins.llm._benchmark_llm", side_effect=_fake_benchmark):
         plugin.benchmark(
             candidate=candidate,
             model=Path("/tmp/fake.gguf"),  # noqa: S108

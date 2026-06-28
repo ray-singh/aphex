@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import torch
 
-from infermap.evaluator import (
+from aphex.evaluator import (
     _PYTORCH_EVAL_BACKENDS,
     EvalDataset,
     auto_metric,
@@ -19,7 +19,7 @@ from infermap.evaluator import (
     load_eval_data,
     load_infer_fn,
 )
-from infermap.inspector import ModelInfo
+from aphex.inspector import ModelInfo
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -385,8 +385,8 @@ def _simple_model() -> torch.nn.Module:
 
 
 def _fake_result(backend: str) -> object:
-    from infermap.benchmark import BenchmarkResult
-    from infermap.candidates import DeploymentCandidate
+    from aphex.benchmark import BenchmarkResult
+    from aphex.candidates import DeploymentCandidate
     cand = DeploymentCandidate(
         backend=backend, dtype="fp32", device="cpu", description=backend,
         requires_export=False,
@@ -438,8 +438,8 @@ def test_fill_accuracy_drop_pytorch_int8_sets_drop() -> None:
 
 def test_fill_accuracy_drop_failed_result_skipped() -> None:
     """Results with error should not get accuracy_drop."""
-    from infermap.benchmark import BenchmarkResult
-    from infermap.candidates import DeploymentCandidate
+    from aphex.benchmark import BenchmarkResult
+    from aphex.candidates import DeploymentCandidate
     cand = DeploymentCandidate(
         backend="pytorch_fp16", dtype="fp16", device="cpu", description="fp16",
         requires_export=False,

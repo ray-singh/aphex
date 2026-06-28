@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 
-from infermap.inspector import inspect_model
+from aphex.inspector import inspect_model
 
 
 class TinyTransformer(nn.Module):

@@ -1,9 +1,9 @@
 """Tests for the recommendation engine."""
 
 
-from infermap.benchmark import BenchmarkResult
-from infermap.candidates import DeploymentCandidate
-from infermap.recommender import recommend
+from aphex.benchmark import BenchmarkResult
+from aphex.candidates import DeploymentCandidate
+from aphex.recommender import recommend
 
 
 def _cand(description: str) -> DeploymentCandidate:
@@ -195,3 +195,31 @@ def test_noisy_winner_gets_rerun_note() -> None:
     results = [_result_with_std("only", 10.0, 3.0)]  # cv 30% → unstable
     rec = recommend(results, objective="latency")
     assert any("re-run" in n for n in (rec.notes or []))
+
+
+# ── 3-axis accuracy Pareto ────────────────────────────────────────────────────
+
+
+def _result_with_acc(description: str, latency: float, memory: float, accuracy_drop: float | None) -> BenchmarkResult:
+    r = _result(description, latency, memory)
+    r.accuracy_drop = accuracy_drop
+    return r
+
+
+def test_3axis_rationale_when_accuracy_present() -> None:
+    results = [
+        _result_with_acc("fp32", latency=5.0, memory=100.0, accuracy_drop=0.0),
+        _result_with_acc("int8", latency=3.0, memory=80.0, accuracy_drop=0.02),
+    ]
+    rec = recommend(results, objective="latency")
+    assert "3-axis" in rec.rationale
+
+
+def test_partial_accuracy_note_fires() -> None:
+    # One result has accuracy measured, one does not.
+    results = [
+        _result_with_acc("fp32", latency=5.0, memory=100.0, accuracy_drop=None),
+        _result_with_acc("int8", latency=3.0, memory=80.0, accuracy_drop=0.02),
+    ]
+    rec = recommend(results, objective="latency")
+    assert any("1/2" in n for n in (rec.notes or []))

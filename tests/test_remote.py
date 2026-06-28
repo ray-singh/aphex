@@ -1,10 +1,10 @@
-"""Tests for infermap.cloud.remote — remote SSH execution helpers."""
+"""Tests for aphex.cloud.remote — remote SSH execution helpers."""
 from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from infermap.cloud.remote import (
+from aphex.cloud.remote import (
     _build_cmd,
     _quote,
     check_remote_aphex,
@@ -65,7 +65,7 @@ def test_build_cmd_output_always_appended() -> None:
 
 
 def test_check_remote_aphex_returns_true_on_zero_exit() -> None:
-    with patch("infermap.cloud.remote.subprocess.run") as mock_run:
+    with patch("aphex.cloud.remote.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0)
         assert check_remote_aphex("user@host") is True
         mock_run.assert_called_once_with(
@@ -76,7 +76,7 @@ def test_check_remote_aphex_returns_true_on_zero_exit() -> None:
 
 
 def test_check_remote_aphex_returns_false_on_nonzero_exit() -> None:
-    with patch("infermap.cloud.remote.subprocess.run") as mock_run:
+    with patch("aphex.cloud.remote.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=1)
         assert check_remote_aphex("user@host") is False
 
@@ -84,7 +84,7 @@ def test_check_remote_aphex_returns_false_on_nonzero_exit() -> None:
 def test_check_remote_aphex_returns_false_on_timeout() -> None:
     import subprocess
     with patch(
-        "infermap.cloud.remote.subprocess.run",
+        "aphex.cloud.remote.subprocess.run",
         side_effect=subprocess.TimeoutExpired("ssh", 15),
     ):
         assert check_remote_aphex("user@host") is False
@@ -118,8 +118,8 @@ def test_run_remote_creates_temp_dir(tmp_path: Path) -> None:
         calls.append(cmd)
         return MagicMock(returncode=0)
 
-    with patch("infermap.cloud.remote._run", side_effect=fake_run), \
-         patch("infermap.cloud.remote._stream", return_value=0):
+    with patch("aphex.cloud.remote._run", side_effect=fake_run), \
+         patch("aphex.cloud.remote._stream", return_value=0):
         run_remote_optimize("user@host", model, ["--input-shape", "3,3"], output)
 
     # First call should be mkdir
@@ -138,8 +138,8 @@ def test_run_remote_uploads_model(tmp_path: Path) -> None:
         calls.append(cmd)
         return MagicMock(returncode=0)
 
-    with patch("infermap.cloud.remote._run", side_effect=fake_run), \
-         patch("infermap.cloud.remote._stream", return_value=0):
+    with patch("aphex.cloud.remote._run", side_effect=fake_run), \
+         patch("aphex.cloud.remote._stream", return_value=0):
         run_remote_optimize("user@host", model, [], output)
 
     scp_up = next(c for c in calls if c[0] == "scp" and "model.pt" in str(c))
@@ -157,8 +157,8 @@ def test_run_remote_streams_aphex_command(tmp_path: Path) -> None:
         streamed.append(cmd)
         return 0
 
-    with patch("infermap.cloud.remote._run", return_value=MagicMock(returncode=0)), \
-         patch("infermap.cloud.remote._stream", side_effect=fake_stream):
+    with patch("aphex.cloud.remote._run", return_value=MagicMock(returncode=0)), \
+         patch("aphex.cloud.remote._stream", side_effect=fake_stream):
         run_remote_optimize("user@host", model, ["--input-shape", "4"], output)
 
     assert len(streamed) == 1
@@ -178,8 +178,8 @@ def test_run_remote_pulls_result_on_success(tmp_path: Path) -> None:
         calls.append(cmd)
         return MagicMock(returncode=0)
 
-    with patch("infermap.cloud.remote._run", side_effect=fake_run), \
-         patch("infermap.cloud.remote._stream", return_value=0):
+    with patch("aphex.cloud.remote._run", side_effect=fake_run), \
+         patch("aphex.cloud.remote._stream", return_value=0):
         run_remote_optimize("user@host", model, [], output)
 
     # download: user@host: appears in position 2 (source); upload has it in position 3 (dest)
@@ -199,8 +199,8 @@ def test_run_remote_skips_pull_on_failure(tmp_path: Path) -> None:
         calls.append(cmd)
         return MagicMock(returncode=0)
 
-    with patch("infermap.cloud.remote._run", side_effect=fake_run), \
-         patch("infermap.cloud.remote._stream", return_value=1):
+    with patch("aphex.cloud.remote._run", side_effect=fake_run), \
+         patch("aphex.cloud.remote._stream", return_value=1):
         exit_code = run_remote_optimize("user@host", model, [], output)
 
     assert exit_code == 1
@@ -219,8 +219,8 @@ def test_run_remote_cleans_up_on_success(tmp_path: Path) -> None:
         calls.append(cmd)
         return MagicMock(returncode=0)
 
-    with patch("infermap.cloud.remote._run", side_effect=fake_run), \
-         patch("infermap.cloud.remote._stream", return_value=0):
+    with patch("aphex.cloud.remote._run", side_effect=fake_run), \
+         patch("aphex.cloud.remote._stream", return_value=0):
         run_remote_optimize("user@host", model, [], output)
 
     cleanup = [c for c in calls if "rm -rf" in str(c)]
@@ -240,8 +240,8 @@ def test_run_remote_cleans_up_on_failure(tmp_path: Path) -> None:
             pass
         return MagicMock(returncode=0)
 
-    with patch("infermap.cloud.remote._run", side_effect=fake_run), \
-         patch("infermap.cloud.remote._stream", return_value=1):
+    with patch("aphex.cloud.remote._run", side_effect=fake_run), \
+         patch("aphex.cloud.remote._stream", return_value=1):
         run_remote_optimize("user@host", model, [], output)
 
     cleanup = [c for c in calls if "rm -rf" in str(c)]
@@ -252,8 +252,8 @@ def test_run_remote_returns_exit_code(tmp_path: Path) -> None:
     model = tmp_path / "model.pt"
     model.write_bytes(b"x")
 
-    with patch("infermap.cloud.remote._run", return_value=MagicMock(returncode=0)), \
-         patch("infermap.cloud.remote._stream", return_value=42):
+    with patch("aphex.cloud.remote._run", return_value=MagicMock(returncode=0)), \
+         patch("aphex.cloud.remote._stream", return_value=42):
         code = run_remote_optimize("user@host", model, [], tmp_path / "out.yaml")
 
     assert code == 42
@@ -271,8 +271,8 @@ def test_run_remote_session_dirs_are_unique(tmp_path: Path) -> None:
         return MagicMock(returncode=0)
 
     for _ in range(3):
-        with patch("infermap.cloud.remote._run", side_effect=fake_run), \
-             patch("infermap.cloud.remote._stream", return_value=0):
+        with patch("aphex.cloud.remote._run", side_effect=fake_run), \
+             patch("aphex.cloud.remote._stream", return_value=0):
             run_remote_optimize("user@host", model, [], tmp_path / "out.yaml")
 
     assert len(set(dirs)) == 3

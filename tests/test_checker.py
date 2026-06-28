@@ -1,7 +1,7 @@
-"""Tests for infermap.checker — regression check logic."""
+"""Tests for aphex.checker — regression check logic."""
 from __future__ import annotations
 
-from infermap.checker import _check, _pct_delta, run_check
+from aphex.checker import _check, _pct_delta, run_check
 
 # ── Baseline fixture ──────────────────────────────────────────────────────────
 

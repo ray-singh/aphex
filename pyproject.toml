@@ -63,10 +63,10 @@ dev = [
 ]
 
 [project.scripts]
-aphex = "infermap.cli:app"
+aphex = "aphex.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["infermap"]
+packages = ["aphex"]
 
 [build-system]
 requires = ["hatchling"]
@@ -110,8 +110,8 @@ disable_error_code = [
 ]
 
 [tool.coverage.run]
-source = ["infermap"]
-omit = ["infermap/serving/**", "tests/**"]
+source = ["aphex"]
+omit = ["tests/**"]
 
 [tool.coverage.report]
 exclude_lines = [

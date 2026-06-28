@@ -19,14 +19,14 @@ from pathlib import Path
 import pytest
 import torch
 
-from infermap import registry
-from infermap.converter import read_deployment_yaml
+from aphex import registry
+from aphex.converter import read_deployment_yaml
 
 # ── evaluator._torch_load ─────────────────────────────────────────────────────
 
 
 def test_torch_load_loads_state_dict_safely(tmp_path: Path) -> None:
-    from infermap.evaluator import _torch_load
+    from aphex.evaluator import _torch_load
 
     p = tmp_path / "weights.pt"
     torch.save({"w": torch.zeros(3)}, p)
@@ -38,7 +38,7 @@ def test_torch_load_loads_state_dict_safely(tmp_path: Path) -> None:
 
 def test_torch_load_rejects_pickle_by_default(tmp_path: Path, monkeypatch) -> None:
     """If weights_only=True fails and APHEX_TRUST_PICKLE isn't set, we error clearly."""
-    from infermap.evaluator import _torch_load
+    from aphex.evaluator import _torch_load
 
     monkeypatch.delenv("APHEX_TRUST_PICKLE", raising=False)
 
@@ -52,7 +52,7 @@ def test_torch_load_rejects_pickle_by_default(tmp_path: Path, monkeypatch) -> No
 
 
 def test_torch_load_allows_pickle_with_env(tmp_path: Path, monkeypatch) -> None:
-    from infermap.evaluator import _torch_load
+    from aphex.evaluator import _torch_load
 
     monkeypatch.setenv("APHEX_TRUST_PICKLE", "1")
 
@@ -69,7 +69,7 @@ def test_torch_load_allows_pickle_with_env(tmp_path: Path, monkeypatch) -> None:
 
 def test_sklearn_baseline_failure_is_logged(caplog) -> None:
     """When predict() raises, _fill_sklearn used to silently return; now it logs."""
-    from infermap.evaluator import EvalDataset, _fill_sklearn
+    from aphex.evaluator import EvalDataset, _fill_sklearn
 
     class Boom:
         def predict(self, X):  # type: ignore[no-untyped-def]
@@ -82,7 +82,7 @@ def test_sklearn_baseline_failure_is_logged(caplog) -> None:
         task="classification",
     )
 
-    with caplog.at_level(logging.WARNING, logger="infermap.evaluator"):
+    with caplog.at_level(logging.WARNING, logger="aphex.evaluator"):
         _fill_sklearn(results=[], model=Boom(), eval_dataset=ds)
 
     assert any("sklearn baseline predict failed" in r.message for r in caplog.records)
@@ -94,7 +94,7 @@ def test_sklearn_baseline_failure_is_logged(caplog) -> None:
 def test_parse_shape_rejects_garbage() -> None:
     import typer
 
-    from infermap.cli import _parse_shape
+    from aphex.cli import _parse_shape
 
     with pytest.raises(typer.Exit):
         _parse_shape("3,abc,224")
@@ -103,7 +103,7 @@ def test_parse_shape_rejects_garbage() -> None:
 def test_parse_shape_rejects_zero() -> None:
     import typer
 
-    from infermap.cli import _parse_shape
+    from aphex.cli import _parse_shape
 
     with pytest.raises(typer.Exit):
         _parse_shape("3,0,224")
@@ -112,14 +112,14 @@ def test_parse_shape_rejects_zero() -> None:
 def test_parse_batch_sizes_rejects_negative() -> None:
     import typer
 
-    from infermap.cli import _parse_batch_sizes
+    from aphex.cli import _parse_batch_sizes
 
     with pytest.raises(typer.Exit):
         _parse_batch_sizes("1,-2,4")
 
 
 def test_parse_shape_accepts_valid() -> None:
-    from infermap.cli import _parse_shape
+    from aphex.cli import _parse_shape
 
     assert _parse_shape("3,224,224") == [3, 224, 224]
     assert _parse_shape("16") == [16]
@@ -131,8 +131,8 @@ def test_parse_shape_accepts_valid() -> None:
 def test_resolve_calibration_warns_when_falling_back(capsys) -> None:
     """If no calibration data is given but eval data exists, _resolve_calibration
     should reuse eval inputs and emit a visible warning."""
-    from infermap.cli import _resolve_calibration
-    from infermap.evaluator import EvalDataset
+    from aphex.cli import _resolve_calibration
+    from aphex.evaluator import EvalDataset
 
     eval_ds = EvalDataset(
         inputs=[torch.zeros(1, 3), torch.ones(1, 3)],
@@ -151,7 +151,7 @@ def test_resolve_calibration_warns_when_falling_back(capsys) -> None:
 
 
 def test_resolve_calibration_no_data_returns_none() -> None:
-    from infermap.cli import _resolve_calibration
+    from aphex.cli import _resolve_calibration
 
     assert _resolve_calibration(None, [3], None) is None
 
@@ -179,7 +179,7 @@ def test_read_deployment_yaml_warns_on_unknown_keys(tmp_path: Path, caplog) -> N
         'recommendation:\n  backend: "onnx_int8_cpu"\n'
         'mystery_section:\n  k: "v"\n'
     )
-    with caplog.at_level(logging.WARNING, logger="infermap.converter"):
+    with caplog.at_level(logging.WARNING, logger="aphex.converter"):
         result = read_deployment_yaml(p)
     assert "recommendation" in result
     assert any("unknown top-level" in r.message for r in caplog.records)
@@ -207,7 +207,7 @@ def test_read_deployment_yaml_rejects_malformed_line(tmp_path: Path) -> None:
 
 def test_cleanup_remote_refuses_unscoped_paths(monkeypatch, caplog) -> None:
     """_cleanup_remote must refuse to rm -rf anything outside /tmp/aphex-*."""
-    from infermap.cloud import remote
+    from aphex.cloud import remote
 
     called: list[list[str]] = []
 
@@ -216,7 +216,7 @@ def test_cleanup_remote_refuses_unscoped_paths(monkeypatch, caplog) -> None:
 
     monkeypatch.setattr(remote, "_run", fake_run)
 
-    with caplog.at_level(logging.ERROR, logger="infermap.cloud.remote"):
+    with caplog.at_level(logging.ERROR, logger="aphex.cloud.remote"):
         remote._cleanup_remote("host", "/")
         remote._cleanup_remote("host", "/etc")
         remote._cleanup_remote("host", "/tmp/something-else")  # noqa: S108
@@ -226,7 +226,7 @@ def test_cleanup_remote_refuses_unscoped_paths(monkeypatch, caplog) -> None:
 
 
 def test_cleanup_remote_allows_scoped_paths(monkeypatch) -> None:
-    from infermap.cloud import remote
+    from aphex.cloud import remote
 
     called: list[list[str]] = []
     monkeypatch.setattr(remote, "_run", lambda cmd, check=True: called.append(cmd))
@@ -266,8 +266,8 @@ def test_get_plugin_triggers_lazy_load(tmp_path: Path) -> None:
 
 def test_fill_accuracy_drop_skips_llm_family(caplog) -> None:
     """Generative models must not get a cosine-similarity accuracy proxy."""
-    from infermap.evaluator import EvalDataset, fill_accuracy_drop
-    from infermap.inspector import ModelInfo
+    from aphex.evaluator import EvalDataset, fill_accuracy_drop
+    from aphex.inspector import ModelInfo
 
     info = ModelInfo(
         framework="pytorch",
@@ -293,7 +293,7 @@ def test_fill_accuracy_drop_skips_llm_family(caplog) -> None:
     r = _DummyResult()
     results = [r]
 
-    with caplog.at_level(logging.WARNING, logger="infermap.evaluator"):
+    with caplog.at_level(logging.WARNING, logger="aphex.evaluator"):
         fill_accuracy_drop(results, torch.nn.Linear(3, 1), info, ds)
 
     # Skipped: accuracy_drop must remain None.
@@ -302,8 +302,8 @@ def test_fill_accuracy_drop_skips_llm_family(caplog) -> None:
 
 
 def test_fill_accuracy_drop_skips_when_task_is_generation(caplog) -> None:
-    from infermap.evaluator import EvalDataset, fill_accuracy_drop
-    from infermap.inspector import ModelInfo
+    from aphex.evaluator import EvalDataset, fill_accuracy_drop
+    from aphex.inspector import ModelInfo
 
     info = ModelInfo(
         framework="pytorch", family="transformer",
@@ -316,7 +316,7 @@ def test_fill_accuracy_drop_skips_when_task_is_generation(caplog) -> None:
         metric="perplexity", task="generation",
     )
 
-    with caplog.at_level(logging.WARNING, logger="infermap.evaluator"):
+    with caplog.at_level(logging.WARNING, logger="aphex.evaluator"):
         fill_accuracy_drop(results=[], model=torch.nn.Linear(1, 1),
                            info=info, eval_dataset=ds)
     assert any("generation quality" in r.message for r in caplog.records)
@@ -324,8 +324,8 @@ def test_fill_accuracy_drop_skips_when_task_is_generation(caplog) -> None:
 
 def test_benchmark_skips_accuracy_proxy_for_llm(caplog) -> None:
     """benchmark._is_generative_family gates the cosine proxy too."""
-    from infermap.benchmark import _is_generative_family
-    from infermap.inspector import ModelInfo
+    from aphex.benchmark import _is_generative_family
+    from aphex.inspector import ModelInfo
 
     def _mk(family: str) -> ModelInfo:
         return ModelInfo(
@@ -345,7 +345,7 @@ def test_benchmark_skips_accuracy_proxy_for_llm(caplog) -> None:
 
 
 def test_gate_jobs_downgrades_when_gpu_candidates_present(capsys) -> None:
-    from infermap.cli import _gate_jobs
+    from aphex.cli import _gate_jobs
 
     class _C:
         def __init__(self, device: str) -> None:
@@ -358,7 +358,7 @@ def test_gate_jobs_downgrades_when_gpu_candidates_present(capsys) -> None:
 
 
 def test_gate_jobs_downgrades_for_mps(capsys) -> None:
-    from infermap.cli import _gate_jobs
+    from aphex.cli import _gate_jobs
 
     class _C:
         def __init__(self, device: str) -> None:
@@ -368,7 +368,7 @@ def test_gate_jobs_downgrades_for_mps(capsys) -> None:
 
 
 def test_gate_jobs_leaves_cpu_only_alone() -> None:
-    from infermap.cli import _gate_jobs
+    from aphex.cli import _gate_jobs
 
     class _C:
         device = "cpu"
@@ -377,7 +377,7 @@ def test_gate_jobs_leaves_cpu_only_alone() -> None:
 
 
 def test_gate_jobs_passthrough_when_jobs_is_one() -> None:
-    from infermap.cli import _gate_jobs
+    from aphex.cli import _gate_jobs
 
     class _C:
         device = "cuda"
@@ -386,7 +386,7 @@ def test_gate_jobs_passthrough_when_jobs_is_one() -> None:
 
 
 def test_gate_jobs_silent_in_json_mode(capsys) -> None:
-    from infermap.cli import _gate_jobs
+    from aphex.cli import _gate_jobs
 
     class _C:
         device = "cuda"
@@ -404,7 +404,7 @@ def test_gate_jobs_silent_in_json_mode(capsys) -> None:
 def test_torch_load_passes_through_unrelated_errors(tmp_path: Path) -> None:
     """Corrupt / unreadable .pt files should surface the original error, not the
     'set APHEX_TRUST_PICKLE' guidance — that would be misleading."""
-    from infermap.evaluator import _torch_load
+    from aphex.evaluator import _torch_load
 
     p = tmp_path / "junk.pt"
     p.write_bytes(b"this is not a torch file at all")
@@ -418,7 +418,7 @@ def test_torch_load_passes_through_unrelated_errors(tmp_path: Path) -> None:
 def test_torch_load_wraps_pickled_module_error_with_guidance(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from infermap.evaluator import _torch_load
+    from aphex.evaluator import _torch_load
 
     monkeypatch.delenv("APHEX_TRUST_PICKLE", raising=False)
     p = tmp_path / "model.pt"
@@ -432,7 +432,7 @@ def test_torch_load_wraps_pickled_module_error_with_guidance(
 
 
 def test_looks_like_pickled_module_heuristic() -> None:
-    from infermap.evaluator import _looks_like_pickled_module
+    from aphex.evaluator import _looks_like_pickled_module
 
     class _FakeUnpickling(Exception):
         pass

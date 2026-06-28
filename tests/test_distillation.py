@@ -11,7 +11,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from infermap.distillation import (
+from aphex.distillation import (
     DistillConfig,
     distill,
     load_student_factory,
@@ -215,7 +215,7 @@ def test_cli_distill_end_to_end(tmp_path: Path) -> None:
     }
     result = subprocess.run(
         [
-            sys.executable, "-m", "infermap.cli", "distill", str(teacher_path),
+            sys.executable, "-m", "aphex.cli", "distill", str(teacher_path),
             "--student", f"{student_factory}:make",
             "--eval", str(eval_path),
             "--epochs", "4",

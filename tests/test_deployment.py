@@ -5,18 +5,18 @@ from pathlib import Path
 
 import pytest
 
-from infermap.benchmark import BenchmarkResult
-from infermap.candidates import DeploymentCandidate
-from infermap.deployment import (
+from aphex.benchmark import BenchmarkResult
+from aphex.candidates import DeploymentCandidate
+from aphex.deployment import (
     DeploymentConfig,
     _scalar,
     build_config,
     config_to_dict,
     write_yaml,
 )
-from infermap.inspector import ModelInfo
-from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
-from infermap.recommender import Recommendation
+from aphex.inspector import ModelInfo
+from aphex.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
+from aphex.recommender import Recommendation
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

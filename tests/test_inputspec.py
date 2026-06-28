@@ -1,10 +1,10 @@
-"""Tests for infermap.inputspec — single/multi input parsing and building."""
+"""Tests for aphex.inputspec — single/multi input parsing and building."""
 from __future__ import annotations
 
 import pytest
 import torch
 
-from infermap.inputspec import InputSpec, TensorSpec
+from aphex.inputspec import InputSpec, TensorSpec
 
 # ── parsing ───────────────────────────────────────────────────────────────────
 

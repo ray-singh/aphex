@@ -1,11 +1,11 @@
-"""Tests for infermap.cloud — storage backend, config, and registry operations."""
+"""Tests for aphex.cloud — storage backend, config, and registry operations."""
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
 
-from infermap.cloud.storage import MemoryBackend, get_backend
+from aphex.cloud.storage import MemoryBackend, get_backend
 
 # ── MemoryBackend ─────────────────────────────────────────────────────────────
 
@@ -71,7 +71,7 @@ def test_memory_read_write_text(tmp_path: Path) -> None:
 
 def test_get_backend_s3_returns_s3_backend() -> None:
     pytest.importorskip("boto3")
-    from infermap.cloud.storage import S3Backend
+    from aphex.cloud.storage import S3Backend
     backend = get_backend("s3://my-bucket/aphex")
     assert isinstance(backend, S3Backend)
 
@@ -81,7 +81,7 @@ def test_get_backend_gcs_returns_gcs_backend(monkeypatch: pytest.MonkeyPatch) ->
     from unittest.mock import MagicMock
     mock_client = MagicMock()
     monkeypatch.setattr(gcs, "Client", lambda: mock_client)
-    from infermap.cloud.storage import GCSBackend
+    from aphex.cloud.storage import GCSBackend
     backend = get_backend("gs://my-bucket/aphex")
     assert isinstance(backend, GCSBackend)
 
@@ -103,7 +103,7 @@ def test_get_backend_s3_no_boto3_raises(monkeypatch) -> None:
 
 def test_get_registry_uri_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APHEX_REGISTRY", "s3://env-bucket/aphex")
-    from infermap.cloud.config import get_registry_uri
+    from aphex.cloud.config import get_registry_uri
     assert get_registry_uri() == "s3://env-bucket/aphex"
 
 
@@ -114,7 +114,7 @@ def test_get_registry_uri_from_config_file(
     cfg = tmp_path / "config.toml"
     cfg.write_text('[registry]\nuri = "gs://cfg-bucket/aphex"\n')
 
-    import infermap.cloud.config as cloud_cfg
+    import aphex.cloud.config as cloud_cfg
     monkeypatch.setattr(cloud_cfg, "_CONFIG_PATH", cfg)
 
     assert cloud_cfg.get_registry_uri() == "gs://cfg-bucket/aphex"
@@ -124,7 +124,7 @@ def test_get_registry_uri_raises_when_unconfigured(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.delenv("APHEX_REGISTRY", raising=False)
-    import infermap.cloud.config as cloud_cfg
+    import aphex.cloud.config as cloud_cfg
     monkeypatch.setattr(cloud_cfg, "_CONFIG_PATH", tmp_path / "nonexistent.toml")
     with pytest.raises(RuntimeError, match="No registry configured"):
         cloud_cfg.get_registry_uri()
@@ -134,7 +134,7 @@ def test_get_registry_uri_raises_when_unconfigured(
 
 
 def test_push_uploads_all_files(tmp_path: Path) -> None:
-    from infermap.cloud.registry import push
+    from aphex.cloud.registry import push
 
     b = MemoryBackend()
     f1 = tmp_path / "model.onnx"
@@ -149,7 +149,7 @@ def test_push_uploads_all_files(tmp_path: Path) -> None:
 
 
 def test_push_updates_latest_pointer(tmp_path: Path) -> None:
-    from infermap.cloud.registry import push
+    from aphex.cloud.registry import push
 
     b = MemoryBackend()
     f = tmp_path / "model.onnx"
@@ -160,7 +160,7 @@ def test_push_updates_latest_pointer(tmp_path: Path) -> None:
 
 
 def test_push_overwrites_latest_on_second_push(tmp_path: Path) -> None:
-    from infermap.cloud.registry import push
+    from aphex.cloud.registry import push
 
     b = MemoryBackend()
     f = tmp_path / "model.onnx"
@@ -175,7 +175,7 @@ def test_push_overwrites_latest_on_second_push(tmp_path: Path) -> None:
 
 
 def test_pull_by_explicit_version(tmp_path: Path) -> None:
-    from infermap.cloud.registry import pull, push
+    from aphex.cloud.registry import pull, push
 
     b = MemoryBackend()
     src = tmp_path / "model.onnx"
@@ -190,7 +190,7 @@ def test_pull_by_explicit_version(tmp_path: Path) -> None:
 
 
 def test_pull_latest_resolves_correctly(tmp_path: Path) -> None:
-    from infermap.cloud.registry import pull, push
+    from aphex.cloud.registry import pull, push
 
     b = MemoryBackend()
     f1 = tmp_path / "v1.onnx"
@@ -207,7 +207,7 @@ def test_pull_latest_resolves_correctly(tmp_path: Path) -> None:
 
 
 def test_pull_unknown_model_raises(tmp_path: Path) -> None:
-    from infermap.cloud.registry import pull
+    from aphex.cloud.registry import pull
 
     b = MemoryBackend()
     with pytest.raises(ValueError, match="No model named"):
@@ -215,7 +215,7 @@ def test_pull_unknown_model_raises(tmp_path: Path) -> None:
 
 
 def test_pull_unknown_version_raises(tmp_path: Path) -> None:
-    from infermap.cloud.registry import pull, push
+    from aphex.cloud.registry import pull, push
 
     b = MemoryBackend()
     f = tmp_path / "model.onnx"
@@ -227,7 +227,7 @@ def test_pull_unknown_version_raises(tmp_path: Path) -> None:
 
 
 def test_pull_creates_output_directory(tmp_path: Path) -> None:
-    from infermap.cloud.registry import pull, push
+    from aphex.cloud.registry import pull, push
 
     b = MemoryBackend()
     f = tmp_path / "model.onnx"
@@ -241,7 +241,7 @@ def test_pull_creates_output_directory(tmp_path: Path) -> None:
 
 
 def test_pull_downloads_multiple_files(tmp_path: Path) -> None:
-    from infermap.cloud.registry import pull, push
+    from aphex.cloud.registry import pull, push
 
     b = MemoryBackend()
     f1 = tmp_path / "model.onnx"
@@ -261,7 +261,7 @@ def test_pull_downloads_multiple_files(tmp_path: Path) -> None:
 
 
 def test_list_models_returns_sorted_names(tmp_path: Path) -> None:
-    from infermap.cloud.registry import list_models, push
+    from aphex.cloud.registry import list_models, push
 
     b = MemoryBackend()
     for model in ["resnet50", "bert-base", "yolov8"]:
@@ -273,14 +273,14 @@ def test_list_models_returns_sorted_names(tmp_path: Path) -> None:
 
 
 def test_list_models_empty_registry() -> None:
-    from infermap.cloud.registry import list_models
+    from aphex.cloud.registry import list_models
 
     b = MemoryBackend()
     assert list_models(b) == []
 
 
 def test_list_versions_returns_sorted_newest_first(tmp_path: Path) -> None:
-    from infermap.cloud.registry import list_versions, push
+    from aphex.cloud.registry import list_versions, push
 
     b = MemoryBackend()
     f = tmp_path / "model.onnx"
@@ -293,7 +293,7 @@ def test_list_versions_returns_sorted_newest_first(tmp_path: Path) -> None:
 
 
 def test_list_versions_excludes_latest_pointer(tmp_path: Path) -> None:
-    from infermap.cloud.registry import list_versions, push
+    from aphex.cloud.registry import list_versions, push
 
     b = MemoryBackend()
     f = tmp_path / "model.onnx"
@@ -305,7 +305,7 @@ def test_list_versions_excludes_latest_pointer(tmp_path: Path) -> None:
 
 
 def test_list_versions_unknown_model() -> None:
-    from infermap.cloud.registry import list_versions
+    from aphex.cloud.registry import list_versions
 
     b = MemoryBackend()
     assert list_versions("ghost", b) == []

@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from infermap.candidates import DeploymentCandidate
-from infermap.cost_model import (
+from aphex.candidates import DeploymentCandidate
+from aphex.cost_model import (
     CostEstimate,
     _confidence,
     _estimate_flops,
@@ -13,8 +13,8 @@ from infermap.cost_model import (
     estimate,
     prune_candidates,
 )
-from infermap.inspector import ModelInfo
-from infermap.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
+from aphex.inspector import ModelInfo
+from aphex.profiler import AcceleratorProfile, CPUProfile, HardwareProfile
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

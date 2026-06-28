@@ -9,9 +9,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-import infermap.registry as reg
-from infermap.plugins.llm import LLMPlugin
-from infermap.plugins.pytorch import PytorchPlugin
+import aphex.registry as reg
+from aphex.plugins.llm import LLMPlugin
+from aphex.plugins.pytorch import PytorchPlugin
 
 
 def _pt(tmp_path: Path) -> Path:
