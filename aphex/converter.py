@@ -80,10 +80,18 @@ def convert(
     Returns a list of written file paths (OpenVINO produces .xml + .bin).
     Raises ValueError for unsupported backends, RuntimeError on conversion failure.
     """
-    if input_spec is not None and not input_spec.is_single and backend in (_TRT_BACKENDS | _OV_BACKENDS):
+    # INT8 calibration for TRT/OV currently feeds a single named input to the
+    # calibrator — multi-input calibration would need a per-input dataset and
+    # is out of scope here. FP32/FP16 multi-input is supported.
+    if (
+        input_spec is not None
+        and not input_spec.is_single
+        and backend in ("tensorrt_int8", "openvino_int8")
+    ):
         raise RuntimeError(
-            f"{backend!r} does not yet support multi-input models "
-            f"({len(input_spec.tensors)} inputs); convert to an ONNX or PyTorch backend."
+            f"{backend!r} does not yet support multi-input INT8 calibration "
+            f"({len(input_spec.tensors)} inputs); use the FP16 variant or an "
+            f"ONNX backend."
         )
 
     if backend in _PYTORCH_BACKENDS:
@@ -91,9 +99,9 @@ def convert(
     if backend in _ONNX_BACKENDS:
         return _convert_onnx(model, backend, input_shape, output_path, input_spec)
     if backend in _TRT_BACKENDS:
-        return _convert_tensorrt(model, backend, input_shape, output_path, calibration_inputs)
+        return _convert_tensorrt(model, backend, input_shape, output_path, calibration_inputs, input_spec)
     if backend in _OV_BACKENDS:
-        return _convert_openvino(model, backend, input_shape, output_path, calibration_inputs)
+        return _convert_openvino(model, backend, input_shape, output_path, calibration_inputs, input_spec)
     raise ValueError(
         f"Unsupported backend for conversion: {backend!r}. "
         f"Convertible backends: {sorted(ALL_CONVERTIBLE)}"
@@ -227,6 +235,7 @@ def _convert_tensorrt(
     input_shape: list[int],
     output_path: Path,
     calibration_inputs: list[Any] | None = None,
+    input_spec: Any = None,
 ) -> list[Path]:
     import tensorrt as trt
     import torch
@@ -240,8 +249,22 @@ def _convert_tensorrt(
         )
 
     m = copy.deepcopy(model).cpu().eval()
-    dummy = torch.zeros(1, *input_shape)
-    onnx_bytes = _export_to_onnx_bytes(m, dummy)
+    if input_spec is not None and not input_spec.is_single:
+        dummy: Any = tuple(
+            torch.zeros(1, *ts.shape, dtype=torch.long if ts.dtype == "long" else torch.float32)
+            for ts in input_spec.tensors
+        )
+        names: list[str] | None = input_spec.names
+        axes: dict | None = input_spec.dynamic_axes()
+        input_tensor_shapes = [
+            (n, ts.shape)
+            for n, ts in zip(input_spec.names, input_spec.tensors, strict=True)
+        ]
+    else:
+        dummy = torch.zeros(1, *input_shape)
+        names, axes = None, None
+        input_tensor_shapes = [("input", tuple(input_shape))]
+    onnx_bytes = _export_to_onnx_bytes(m, dummy, names, axes)
 
     logger = trt.Logger(trt.Logger.ERROR)
     builder = trt.Builder(logger)
@@ -254,6 +277,12 @@ def _convert_tensorrt(
 
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+
+    # Dynamic batch axis requires an explicit optimization profile per input.
+    profile = builder.create_optimization_profile()
+    for name, shape in input_tensor_shapes:
+        profile.set_shape(name, min=(1, *shape), opt=(1, *shape), max=(32, *shape))
+    config.add_optimization_profile(profile)
 
     if backend == "tensorrt_fp16":
         config.set_flag(trt.BuilderFlag.FP16)
@@ -276,6 +305,7 @@ def _convert_openvino(
     input_shape: list[int],
     output_path: Path,
     calibration_inputs: list[Any] | None = None,
+    input_spec: Any = None,
 ) -> list[Path]:
     import io
 
@@ -289,8 +319,17 @@ def _convert_openvino(
         )
 
     m = copy.deepcopy(model).cpu().eval().float()
-    dummy = torch.zeros(1, *input_shape)
-    onnx_bytes = _export_to_onnx_bytes(m, dummy)
+    if input_spec is not None and not input_spec.is_single:
+        dummy: Any = tuple(
+            torch.zeros(1, *ts.shape, dtype=torch.long if ts.dtype == "long" else torch.float32)
+            for ts in input_spec.tensors
+        )
+        names: list[str] | None = input_spec.names
+        axes: dict | None = input_spec.dynamic_axes()
+    else:
+        dummy = torch.zeros(1, *input_shape)
+        names, axes = None, None
+    onnx_bytes = _export_to_onnx_bytes(m, dummy, names, axes)
     ov_model = ov.convert_model(io.BytesIO(onnx_bytes))
 
     if backend == "openvino_int8":

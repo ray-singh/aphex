@@ -53,6 +53,23 @@ class InputSpec:
         """Single-input spec; ``long`` dtype when the model has an embedding vocab."""
         return cls.single(shape, "long" if vocab else "float")
 
+    def serialize(self) -> str:
+        """Inverse of :meth:`parse`: produce the CLI ``--input-shape`` string.
+
+        Single-input default specs (one ``"input"`` tensor of dtype ``float``)
+        round-trip to the legacy comma form ``"3,224,224"``; everything else
+        uses the explicit ``name:dims[:dtype];...`` syntax. Round-trip property:
+        ``InputSpec.parse(spec.serialize()) == spec``.
+        """
+        if self.is_single:
+            ts = self.tensors[0]
+            if ts.name == _DEFAULT_INPUT_NAME and ts.dtype == "float":
+                return ",".join(str(d) for d in ts.shape)
+        return ";".join(
+            f"{ts.name}:{','.join(str(d) for d in ts.shape)}:{ts.dtype}"
+            for ts in self.tensors
+        )
+
     @classmethod
     def parse(cls, text: str) -> InputSpec:
         """Parse a CLI ``--input-shape`` string.

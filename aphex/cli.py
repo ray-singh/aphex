@@ -408,7 +408,7 @@ def optimize(
             system=sys_cfg,
             eval_metric=eval_result[0] if eval_result else None,
             eval_score=eval_result[1] if eval_result else None,
-            input_shape=shape,
+            input_shape=input_spec.serialize(),
         )
         if write_output:
             write_yaml(cfg, output)  # type: ignore[arg-type]
@@ -677,10 +677,11 @@ def check(
         err_console.print("deployment.yaml has no model.input_shape — re-run aphex optimize.")
         raise typer.Exit(code=1)
     try:
-        shape = [int(x) for x in str(shape_str).split(",")]
-    except ValueError:
-        err_console.print(f"Invalid input_shape in config: {shape_str!r}")
+        input_spec = _parse_input_spec(str(shape_str))
+    except ValueError as exc:
+        err_console.print(f"Invalid input_shape in config: {shape_str!r} ({exc})")
         raise typer.Exit(code=1)
+    shape = input_spec.primary_shape
 
     batch_size = int(rec.get("batch_size") or 1)
     description = rec.get("description") or backend
@@ -707,7 +708,10 @@ def check(
     )
 
     with console.status(f"[bold green]Benchmarking {backend}..."):
-        result = plugin.benchmark(cand, model, info, shape, batch_size, warmup, iters, None, None)
+        result = plugin.benchmark(
+            cand, model, info, shape, batch_size, warmup, iters, None, None,
+            input_spec=input_spec,
+        )
 
     if not result.ok:
         err_console.print(f"Benchmark failed: {result.error}")

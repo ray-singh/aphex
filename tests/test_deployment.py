@@ -241,6 +241,36 @@ def test_write_yaml_can_be_round_tripped(tmp_path: Path) -> None:
     assert data["model"]["parameters"] == cfg.parameters
 
 
+def test_input_shape_round_trip_single(tmp_path: Path) -> None:
+    """Single-input legacy form must round-trip unchanged through deployment.yaml."""
+    from aphex.converter import read_deployment_yaml
+    from aphex.inputspec import InputSpec
+
+    cfg = build_config(_rec(), _info(), _hw(), input_shape="3,224,224")
+    p = tmp_path / "deployment.yaml"
+    write_yaml(cfg, p)
+    data = read_deployment_yaml(p)
+    assert data["model"]["input_shape"] == "3,224,224"
+    assert InputSpec.parse(data["model"]["input_shape"]).primary_shape == [3, 224, 224]
+
+
+def test_input_shape_round_trip_multi(tmp_path: Path) -> None:
+    """Multi-input ``name:dims:dtype`` syntax must survive write+read."""
+    from aphex.converter import read_deployment_yaml
+    from aphex.inputspec import InputSpec
+
+    spec_str = "input_ids:128:long;attention_mask:128:long"
+    cfg = build_config(_rec(), _info(), _hw(), input_shape=spec_str)
+    p = tmp_path / "deployment.yaml"
+    write_yaml(cfg, p)
+    data = read_deployment_yaml(p)
+    assert data["model"]["input_shape"] == spec_str
+    spec = InputSpec.parse(data["model"]["input_shape"])
+    assert not spec.is_single
+    assert spec.names == ["input_ids", "attention_mask"]
+    assert all(t.dtype == "long" for t in spec.tensors)
+
+
 def test_write_yaml_float_formatting(tmp_path: Path) -> None:
     p = tmp_path / "deployment.yaml"
     r = _result(latency=3.1415926)

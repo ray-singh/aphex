@@ -29,13 +29,13 @@ jobs:
         run: uv sync --all-extras --dev
 
       - name: Lint
-        run: uv run ruff check infermap/ tests/
+        run: uv run ruff check aphex/ tests/
 
       - name: Type check
-        run: uv run mypy infermap/ --ignore-missing-imports
+        run: uv run mypy aphex/ --ignore-missing-imports
 
       - name: Test
-        run: uv run pytest tests/ -v --cov=infermap --cov-report=term-missing
+        run: uv run pytest tests/ -v --cov=aphex --cov-report=term-missing
 
   publish-test:
     if: startsWith(github.ref, 'refs/tags/v')

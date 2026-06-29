@@ -47,8 +47,11 @@ class DeploymentConfig:
     max_quality_loss: float | None
     # meta
     generated_at: str
-    # input shape (no batch dim) — stored so `aphex convert --from-config` is self-contained
-    input_shape: list[int] | None = None
+    # Input spec string (parseable by :meth:`InputSpec.parse`) — stored so
+    # ``aphex convert --from-config`` / ``aphex check --from-config`` are
+    # self-contained. Single-input round-trips as ``"3,224,224"``; multi-input
+    # as ``"input_ids:128:long;attention_mask:128:long"``.
+    input_shape: str | None = None
     # system-level serving config (optional)
     system: SystemConfig | None = None
     # eval (optional — populated when --eval + --infer-fn are provided)
@@ -68,7 +71,7 @@ def build_config(
     system: SystemConfig | None = None,
     eval_metric: str | None = None,
     eval_score: float | None = None,
-    input_shape: list[int] | None = None,
+    input_shape: str | None = None,
 ) -> DeploymentConfig:
     r = rec.result
     return DeploymentConfig(
@@ -112,7 +115,7 @@ def config_to_dict(config: DeploymentConfig) -> dict[str, Any]:
             "framework": config.framework,
             "family": config.family,
             "parameters": config.parameters,
-            "input_shape": ",".join(str(x) for x in config.input_shape) if config.input_shape else None,
+            "input_shape": config.input_shape,
         },
         "hardware": {
             "accelerator": config.accelerator_kind,

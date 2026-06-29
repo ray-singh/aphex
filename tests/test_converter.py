@@ -375,6 +375,58 @@ def test_convert_openvino_fp32_creates_xml_and_bin(tmp_path: Path) -> None:
     assert set(written) == {xml, bin_}
 
 
+# ── convert: multi-input gating (FP32/FP16 allowed, INT8 still gated) ────────
+
+
+def test_convert_tensorrt_int8_multi_input_gated(tmp_path: Path) -> None:
+    from aphex.inputspec import InputSpec
+    spec = InputSpec.parse("a:4;b:6")
+    with pytest.raises(RuntimeError, match="multi-input INT8"):
+        convert(_tiny_model(), "tensorrt_int8", [4], tmp_path / "x.engine",
+                calibration_inputs=[torch.zeros(1, 4)], input_spec=spec)
+
+
+def test_convert_openvino_int8_multi_input_gated(tmp_path: Path) -> None:
+    from aphex.inputspec import InputSpec
+    spec = InputSpec.parse("a:4;b:6")
+    with pytest.raises(RuntimeError, match="multi-input INT8"):
+        convert(_tiny_model(), "openvino_int8", [4], tmp_path / "x.xml",
+                calibration_inputs=[torch.zeros(1, 4)], input_spec=spec)
+
+
+def test_convert_tensorrt_fp16_multi_input_attempted(tmp_path: Path) -> None:
+    """Multi-input FP16 must reach the backend (no early 'not yet supported')."""
+    pytest.importorskip("tensorrt")
+    from aphex.inputspec import InputSpec
+    out = tmp_path / "model.engine"
+    spec = InputSpec.parse("a:4;b:6")
+
+    class TwoInput(nn.Module):
+        def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+            return a.sum(-1, keepdim=True) + b.sum(-1, keepdim=True)
+
+    written = convert(TwoInput().eval(), "tensorrt_fp16", [4], out, input_spec=spec)
+    assert out.exists()
+    assert written == [out]
+
+
+def test_convert_openvino_fp32_multi_input_attempted(tmp_path: Path) -> None:
+    """Multi-input OV must reach the backend (no early 'not yet supported')."""
+    pytest.importorskip("openvino")
+    from aphex.inputspec import InputSpec
+    out = tmp_path / "model.xml"
+    spec = InputSpec.parse("a:4;b:6")
+
+    class TwoInput(nn.Module):
+        def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+            return a.sum(-1, keepdim=True) + b.sum(-1, keepdim=True)
+
+    written = convert(TwoInput().eval(), "openvino_fp32", [4], out, input_spec=spec)
+    assert out.exists()
+    assert (tmp_path / "model.bin").exists()
+    assert set(written) == {out, tmp_path / "model.bin"}
+
+
 # ── convert: sklearn / tree-ensemble backends ─────────────────────────────────
 
 
@@ -488,19 +540,3 @@ def test_convert_multi_input_onnx_names_inputs(tmp_path: Path) -> None:
     assert names == ["x", "y"]
 
 
-def test_convert_multi_input_tensorrt_raises(tmp_path: Path) -> None:
-    from aphex.inputspec import InputSpec
-
-    spec = InputSpec.parse("x:4;y:6")
-    with pytest.raises(RuntimeError, match="multi-input"):
-        convert(_TwoInputNet().eval(), "tensorrt_fp16", spec.primary_shape,
-                tmp_path / "x.engine", input_spec=spec)
-
-
-def test_convert_multi_input_openvino_raises(tmp_path: Path) -> None:
-    from aphex.inputspec import InputSpec
-
-    spec = InputSpec.parse("x:4;y:6")
-    with pytest.raises(RuntimeError, match="multi-input"):
-        convert(_TwoInputNet().eval(), "openvino_fp32", spec.primary_shape,
-                tmp_path / "x.xml", input_spec=spec)

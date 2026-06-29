@@ -50,6 +50,32 @@ def test_parse_empty_raises() -> None:
         InputSpec.parse("   ")
 
 
+# ── serialize / round-trip ────────────────────────────────────────────────────
+
+
+def test_serialize_single_default_uses_legacy_form() -> None:
+    # Default-name single-input float tensors keep the legacy comma form so
+    # deployment.yaml stays back-compatible with pre-multi-input writers.
+    assert InputSpec.single([3, 224, 224]).serialize() == "3,224,224"
+
+
+def test_serialize_round_trip_single() -> None:
+    spec = InputSpec.parse("3,224,224")
+    assert InputSpec.parse(spec.serialize()) == spec
+
+
+def test_serialize_round_trip_multi() -> None:
+    spec = InputSpec.parse("input_ids:128:long;attention_mask:128:long")
+    assert InputSpec.parse(spec.serialize()) == spec
+
+
+def test_serialize_named_single_uses_explicit_form() -> None:
+    spec = InputSpec.parse("pixel_values:3,224,224")
+    s = spec.serialize()
+    assert "pixel_values" in s and "3,224,224" in s
+    assert InputSpec.parse(s) == spec
+
+
 # ── dynamic axes / names ──────────────────────────────────────────────────────
 
 
